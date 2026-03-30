@@ -1,5 +1,6 @@
 import cron, { ScheduledTask } from 'node-cron';
 import { getSupabaseClient } from '@/storage/database/supabase-client';
+import { enqueueMonitorTask } from './monitor-queue';
 import {
   createScraper,
   isProductSent,
@@ -14,6 +15,9 @@ interface MonitorConfig {
   search_keyword: string;
   price_min: number | null;
   price_max: number | null;
+  region_province: string | null;
+  region_city: string | null;
+  region_district: string | null;
   time_range: string | null;
   sort_type: string | null;
   cron_expression: string;
@@ -74,12 +78,11 @@ export function startMonitor(config: MonitorConfig) {
   const task = cron.schedule(
     config.cron_expression,
     async () => {
-      console.log(`[${new Date().toISOString()}] 执行监控任务 #${config.id}: ${config.search_keyword}`);
-      await executeMonitor(config);
+      const label = `scheduler#${config.id}:${config.search_keyword}`;
+      console.log(`[${new Date().toISOString()}] 监控任务入队 #${config.id}: ${config.search_keyword}`);
+      await enqueueMonitorTask(label, () => executeMonitor(config));
     },
-    {
-      timezone: 'Asia/Shanghai',
-    },
+    { timezone: 'Asia/Shanghai' },
   );
 
   scheduledTasks.set(config.id, task);
@@ -99,8 +102,8 @@ export function stopMonitor(configId: number) {
 
 export async function executeMonitor(config: MonitorConfig): Promise<Product[]> {
   try {
-    if (!config.cookies) {
-      console.warn(`配置 #${config.id} 未设置 Cookie，可能无法正常抓取数据`);
+    if (!config.cookies && !config.browser_user_data_dir) {
+      console.warn(`配置 #${config.id} 未设置登录态，未提供 Cookie 或浏览器用户目录，可能无法正常抓取数据`);
     }
 
     const browserOptions = {
@@ -118,6 +121,9 @@ export async function executeMonitor(config: MonitorConfig): Promise<Product[]> 
         keyword: config.search_keyword,
         priceMin: config.price_min || undefined,
         priceMax: config.price_max || undefined,
+        regionProvince: config.region_province || undefined,
+        regionCity: config.region_city || undefined,
+        regionDistrict: config.region_district || undefined,
         timeRange: config.time_range || undefined,
         sortType: config.sort_type || undefined,
         cookies: config.cookies || undefined,
@@ -170,7 +176,8 @@ export async function triggerMonitor(configId: number): Promise<Product[]> {
     throw new Error('监控配置不存在');
   }
 
-  return executeMonitor(config as MonitorConfig);
+  const label = `manual#${configId}:${config.search_keyword}`;
+  return enqueueMonitorTask(label, () => executeMonitor(config as MonitorConfig));
 }
 
 export function stopAllMonitors() {

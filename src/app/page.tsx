@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   ArrowUpDown,
@@ -11,6 +11,7 @@ import {
   DollarSign,
   Edit,
   Eye,
+  MapPinned,
   Play,
   Plus,
   RefreshCw,
@@ -28,12 +29,16 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
+import { getCitiesByProvince, PROVINCE_OPTIONS } from '@/lib/china-regions';
 
 interface MonitorConfig {
   id: number;
   search_keyword: string;
   price_min: number | null;
   price_max: number | null;
+  region_province: string | null;
+  region_city: string | null;
+  region_district: string | null;
   time_range: string | null;
   sort_type: string | null;
   cron_expression: string;
@@ -46,13 +51,15 @@ interface MonitorConfig {
   browser_executable_path: string | null;
   browser_user_data_dir: string | null;
   created_at: string;
-  updated_at: string | null;
 }
 
 interface FormDataState {
   search_keyword: string;
   price_min: string;
   price_max: string;
+  region_province: string;
+  region_city: string;
+  region_district: string;
   time_range: string;
   sort_type: string;
   cron_expression: string;
@@ -70,6 +77,9 @@ const defaultFormData: FormDataState = {
   search_keyword: '摩托车',
   price_min: '20000',
   price_max: '',
+  region_province: '',
+  region_city: '',
+  region_district: '',
   time_range: '1hour',
   sort_type: 'newest',
   cron_expression: '0 */30 * * * *',
@@ -83,6 +93,28 @@ const defaultFormData: FormDataState = {
   browser_user_data_dir: '',
 };
 
+const getTimeRangeLabel = (range: string | null) =>
+  ({ '1hour': '1 小时内', '24hours': '24 小时内', '7days': '7 天内' }[range || ''] || '不限');
+
+const getSortTypeLabel = (sort: string | null) =>
+  ({ newest: '最新上架', price_asc: '价格从低到高', price_desc: '价格从高到低' }[sort || ''] ||
+    '默认排序');
+
+const getCronDescription = (cron: string) =>
+  ({
+    '0 */5 * * * *': '每 5 分钟',
+    '0 */10 * * * *': '每 10 分钟',
+    '0 */15 * * * *': '每 15 分钟',
+    '0 */30 * * * *': '每 30 分钟',
+    '0 * * * * *': '每小时',
+    '0 */2 * * * *': '每 2 小时',
+    '0 */6 * * * *': '每 6 小时',
+    '0 0 * * * *': '每天整点',
+  }[cron] || cron);
+
+const getRegionLabel = (config: Pick<MonitorConfig, 'region_province' | 'region_city' | 'region_district'>) =>
+  [config.region_province, config.region_city, config.region_district].filter(Boolean).join(' / ');
+
 export default function Home() {
   const [configs, setConfigs] = useState<MonitorConfig[]>([]);
   const [loading, setLoading] = useState(true);
@@ -94,7 +126,12 @@ export default function Home() {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [formData, setFormData] = useState<FormDataState>(defaultFormData);
 
-  const loadConfigs = async () => {
+  const cityOptions = useMemo(
+    () => getCitiesByProvince(formData.region_province),
+    [formData.region_province],
+  );
+
+  const loadConfigs = useCallback(async () => {
     try {
       const response = await fetch('/api/configs');
       const data = await response.json();
@@ -104,7 +141,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   const loadLogs = useCallback(async () => {
     try {
@@ -120,36 +157,26 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    loadConfigs();
-  }, []);
+    void loadConfigs();
+  }, [loadConfigs]);
 
   useEffect(() => {
-    if (!showLogs || !autoRefresh) {
-      return;
-    }
-
-    loadLogs();
-    const timer = setInterval(loadLogs, 3000);
+    if (!showLogs || !autoRefresh) return;
+    void loadLogs();
+    const timer = setInterval(() => void loadLogs(), 3000);
     return () => clearInterval(timer);
-  }, [showLogs, autoRefresh, loadLogs]);
+  }, [autoRefresh, loadLogs, showLogs]);
 
   useEffect(() => {
-    if (showLogs) {
-      loadLogs();
-    }
+    if (showLogs) void loadLogs();
   }, [showLogs, loadLogs]);
 
-  const updateForm = <K extends keyof FormDataState>(key: K, value: FormDataState[K]) => {
+  const updateForm = <K extends keyof FormDataState>(key: K, value: FormDataState[K]) =>
     setFormData(prev => ({ ...prev, [key]: value }));
-  };
-
-  const resetForm = () => {
-    setFormData(defaultFormData);
-  };
 
   const openCreateForm = () => {
     setEditingConfig(null);
-    resetForm();
+    setFormData(defaultFormData);
     setShowForm(true);
   };
 
@@ -159,6 +186,9 @@ export default function Home() {
       search_keyword: config.search_keyword,
       price_min: config.price_min?.toString() || '',
       price_max: config.price_max?.toString() || '',
+      region_province: config.region_province || '',
+      region_city: config.region_city || '',
+      region_district: config.region_district || '',
       time_range: config.time_range || '1hour',
       sort_type: config.sort_type || 'newest',
       cron_expression: config.cron_expression,
@@ -178,6 +208,9 @@ export default function Home() {
     search_keyword: formData.search_keyword,
     price_min: formData.price_min ? parseInt(formData.price_min, 10) : null,
     price_max: formData.price_max ? parseInt(formData.price_max, 10) : null,
+    region_province: formData.region_province || null,
+    region_city: formData.region_city || null,
+    region_district: formData.region_district || null,
     time_range: formData.time_range || null,
     sort_type: formData.sort_type || null,
     cron_expression: formData.cron_expression,
@@ -195,7 +228,6 @@ export default function Home() {
     try {
       const url = editingConfig ? `/api/configs/${editingConfig.id}` : '/api/configs';
       const method = editingConfig ? 'PUT' : 'POST';
-
       const response = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
@@ -211,17 +243,15 @@ export default function Home() {
       toast.success(editingConfig ? '配置已更新' : '配置已创建');
       setShowForm(false);
       setEditingConfig(null);
-      resetForm();
-      loadConfigs();
+      setFormData(defaultFormData);
+      void loadConfigs();
     } catch {
       toast.error('保存失败');
     }
   };
 
   const handleDelete = async (id: number) => {
-    if (!confirm('确定要删除这条监控配置吗？')) {
-      return;
-    }
+    if (!confirm('确定要删除这条监控配置吗？')) return;
 
     try {
       const response = await fetch(`/api/configs/${id}`, { method: 'DELETE' });
@@ -230,7 +260,7 @@ export default function Home() {
         return;
       }
       toast.success('配置已删除');
-      loadConfigs();
+      void loadConfigs();
     } catch {
       toast.error('删除失败');
     }
@@ -242,11 +272,9 @@ export default function Home() {
       const response = await fetch(`/api/trigger/${id}`, { method: 'POST' });
       const data = await response.json();
 
-      if (!response.ok) {
+      if (!response.ok || data.success === false) {
         toast.error(data.error || '扫描失败');
-        if (data.hint) {
-          toast.info(data.hint, { duration: 10000 });
-        }
+        if (data.hint) toast.info(data.hint, { duration: 10000 });
         return;
       }
 
@@ -259,68 +287,24 @@ export default function Home() {
       }
 
       if (showLogs) {
-        setTimeout(loadLogs, 1000);
+        setTimeout(() => void loadLogs(), 1000);
       }
     } catch {
       toast.error('触发扫描失败');
     }
   };
 
-  const getTimeRangeLabel = (range: string | null) => {
-    const labels: Record<string, string> = {
-      '1hour': '1 小时内',
-      '24hours': '24 小时内',
-      '7days': '7 天内',
-    };
-    return labels[range || ''] || '不限';
-  };
-
-  const getSortTypeLabel = (sort: string | null) => {
-    const labels: Record<string, string> = {
-      'newest': '最新上架',
-      'price_asc': '价格从低到高',
-      'price_desc': '价格从高到低',
-    };
-    return labels[sort || ''] || '默认排序';
-  };
-
-  const getCronDescription = (cron: string) => {
-    if (cron === '0 */5 * * * *') return '每 5 分钟';
-    if (cron === '0 */10 * * * *') return '每 10 分钟';
-    if (cron === '0 */15 * * * *') return '每 15 分钟';
-    if (cron === '0 */30 * * * *') return '每 30 分钟';
-    if (cron === '0 * * * * *') return '每小时';
-    if (cron === '0 */2 * * * *') return '每 2 小时';
-    if (cron === '0 */6 * * * *') return '每 6 小时';
-    if (cron === '0 0 * * * *') return '每天整点';
-    return cron;
-  };
-
-  const getBrowserModeLabel = (config: MonitorConfig) => {
-    const mode = config.browser_headless ? '无头' : '可视';
-    const channel = config.browser_channel || '系统默认';
-    return `${mode} / ${channel}`;
-  };
-
   const highlightLog = (log: string) => {
-    if (log.includes('ERROR') || log.includes('error') || log.includes('失败')) {
-      return 'text-red-400';
-    }
-    if (log.includes('WARN') || log.includes('警告')) {
-      return 'text-yellow-400';
-    }
-    if (log.includes('成功') || log.includes('完成')) {
-      return 'text-green-400';
-    }
-    if (log.includes('扫描') || log.includes('监控')) {
-      return 'text-blue-300';
-    }
+    if (log.includes('ERROR') || log.includes('error') || log.includes('失败')) return 'text-red-400';
+    if (log.includes('WARN') || log.includes('警告')) return 'text-yellow-400';
+    if (log.includes('成功') || log.includes('完成')) return 'text-green-400';
+    if (log.includes('扫描') || log.includes('监控')) return 'text-blue-300';
     return 'text-slate-300';
   };
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100">
+      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100">
         <div className="text-lg text-slate-600">加载中...</div>
       </div>
     );
@@ -332,7 +316,7 @@ export default function Home() {
         <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <h1 className="text-3xl font-bold tracking-tight text-slate-900">闲鱼商品监控</h1>
-            <p className="mt-2 text-slate-600">定时扫描闲鱼搜索结果，发现新商品后记录并通知。</p>
+            <p className="mt-2 text-slate-600">支持关键词、价格、地区和浏览器行为配置，定时扫描并推送新商品。</p>
           </div>
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => setShowLogs(true)} className="gap-2">
@@ -351,10 +335,9 @@ export default function Home() {
             <div className="flex items-start gap-3">
               <AlertCircle className="mt-0.5 h-5 w-5 text-amber-700" />
               <div className="text-sm text-amber-900">
-                <p className="font-medium">浏览器行为说明</p>
+                <p className="font-medium">区域筛选说明</p>
                 <p className="mt-1">
-                  现在每条监控都可以在配置页里单独设置浏览器模式。你可以切换无头/可视模式、选择
-                  `chrome` 或 `msedge`、指定本机浏览器路径，或复用本地用户目录来继承登录态。
+                  支持省、市、区县三级配置。你可以只选省，也可以继续选到城市；区县是可选项，抓取时会尝试按层级点击闲鱼地区弹层。
                 </p>
               </div>
             </div>
@@ -366,7 +349,7 @@ export default function Home() {
             <CardContent>
               <Search className="mx-auto mb-4 h-16 w-16 text-slate-300" />
               <h3 className="mb-2 text-lg font-semibold text-slate-700">还没有监控配置</h3>
-              <p className="mb-4 text-slate-500">先创建一条配置，测试搜索结果和浏览器调试选项。</p>
+              <p className="mb-4 text-slate-500">先创建一条配置，测试关键词、地区和浏览器筛选效果。</p>
               <Button onClick={openCreateForm}>
                 <Plus className="mr-2 h-4 w-4" />
                 创建监控
@@ -388,11 +371,11 @@ export default function Home() {
                         </Badge>
                       </CardTitle>
                       <CardDescription className="mt-3 flex flex-wrap gap-3 text-sm">
-                        {config.price_min && (
+                        {(config.price_min || config.price_max) && (
                           <span className="flex items-center gap-1">
                             <DollarSign className="h-4 w-4" />
-                            {config.price_min}
-                            {config.price_max ? ` - ${config.price_max}` : ''} 元
+                            {config.price_min || 0}
+                            {config.price_max ? ` - ${config.price_max}` : '+'} 元
                           </span>
                         )}
                         <span className="flex items-center gap-1">
@@ -403,15 +386,16 @@ export default function Home() {
                           <ArrowUpDown className="h-4 w-4" />
                           {getSortTypeLabel(config.sort_type)}
                         </span>
+                        {getRegionLabel(config) && (
+                          <span className="flex items-center gap-1">
+                            <MapPinned className="h-4 w-4" />
+                            {getRegionLabel(config)}
+                          </span>
+                        )}
                       </CardDescription>
                     </div>
                     <div className="flex gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleTrigger(config.id)}
-                        disabled={!config.is_active}
-                      >
+                      <Button variant="outline" size="sm" onClick={() => handleTrigger(config.id)} disabled={!config.is_active}>
                         <Play className="mr-1 h-4 w-4" />
                         立即扫描
                       </Button>
@@ -427,26 +411,11 @@ export default function Home() {
                 <CardContent>
                   <div className="flex flex-col gap-3 text-sm text-slate-600 md:flex-row md:items-center md:justify-between">
                     <div className="flex flex-wrap items-center gap-4">
-                      <span className="flex items-center gap-1">
-                        <Bell className="h-4 w-4" />
-                        {config.webhook_url ? '已配置通知' : '未配置通知'}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Cookie className="h-4 w-4" />
-                        {config.cookies ? '已配置 Cookie' : '未配置 Cookie'}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Eye className="h-4 w-4" />
-                        {getBrowserModeLabel(config)}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Bug className="h-4 w-4" />
-                        {config.browser_save_debug ?? true ? '保存调试文件' : '不保存调试文件'}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Clock className="h-4 w-4" />
-                        {getCronDescription(config.cron_expression)}
-                      </span>
+                      <span className="flex items-center gap-1"><Bell className="h-4 w-4" />{config.webhook_url ? '已配置通知' : '未配置通知'}</span>
+                      <span className="flex items-center gap-1"><Cookie className="h-4 w-4" />{config.cookies ? '已配置 Cookie' : '未配置 Cookie'}</span>
+                      <span className="flex items-center gap-1"><Eye className="h-4 w-4" />{(config.browser_headless ? '无头' : '可视') + ' / ' + (config.browser_channel || '系统默认')}</span>
+                      <span className="flex items-center gap-1"><Bug className="h-4 w-4" />{config.browser_save_debug ?? true ? '保存调试文件' : '不保存调试文件'}</span>
+                      <span className="flex items-center gap-1"><Clock className="h-4 w-4" />{getCronDescription(config.cron_expression)}</span>
                     </div>
                     <span>创建于 {new Date(config.created_at).toLocaleString('zh-CN')}</span>
                   </div>
@@ -458,50 +427,82 @@ export default function Home() {
 
         {showForm && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-            <Card className="max-h-[92vh] w-full max-w-3xl overflow-y-auto">
+            <Card className="max-h-[92vh] w-full max-w-4xl overflow-y-auto">
               <CardHeader>
                 <CardTitle>{editingConfig ? '编辑监控配置' : '新建监控配置'}</CardTitle>
-                <CardDescription>搜索条件、Cookie、通知和浏览器行为都可以在这里集中配置。</CardDescription>
+                <CardDescription>关键词、区域、Cookie、通知和浏览器行为都可以在这里集中配置。</CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
                 <div className="space-y-2">
                   <Label htmlFor="keyword">搜索关键词</Label>
-                  <Input
-                    id="keyword"
-                    value={formData.search_keyword}
-                    onChange={e => updateForm('search_keyword', e.target.value)}
-                    placeholder="例如：摩托车"
-                  />
+                  <Input id="keyword" value={formData.search_keyword} onChange={e => updateForm('search_keyword', e.target.value)} placeholder="例如：摩托车" />
                 </div>
 
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="priceMin">最低价格（元）</Label>
-                    <Input
-                      id="priceMin"
-                      type="number"
-                      value={formData.price_min}
-                      onChange={e => updateForm('price_min', e.target.value)}
-                    />
+                    <Input id="priceMin" type="number" value={formData.price_min} onChange={e => updateForm('price_min', e.target.value)} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="priceMax">最高价格（元）</Label>
-                    <Input
-                      id="priceMax"
-                      type="number"
-                      value={formData.price_max}
-                      onChange={e => updateForm('price_max', e.target.value)}
-                    />
+                    <Input id="priceMax" type="number" value={formData.price_max} onChange={e => updateForm('price_max', e.target.value)} />
                   </div>
                 </div>
+
+                <Card className="border-slate-200 bg-slate-50/80">
+                  <CardHeader>
+                    <CardTitle className="text-base">区域筛选</CardTitle>
+                    <CardDescription>省、市联动；区县可选填。只选省会按省过滤，继续选市会缩小到城市层级。</CardDescription>
+                  </CardHeader>
+                  <CardContent className="grid gap-4 md:grid-cols-3">
+                    <div className="space-y-2">
+                      <Label>省份</Label>
+                      <Select
+                        value={formData.region_province || 'all'}
+                        onValueChange={value => {
+                          const province = value === 'all' ? '' : value;
+                          updateForm('region_province', province);
+                          updateForm('region_city', '');
+                          updateForm('region_district', '');
+                        }}
+                      >
+                        <SelectTrigger><SelectValue placeholder="不限省份" /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">不限省份</SelectItem>
+                          {PROVINCE_OPTIONS.map(province => (
+                            <SelectItem key={province} value={province}>{province}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>城市</Label>
+                      <Select
+                        value={formData.region_city || 'all'}
+                        onValueChange={value => updateForm('region_city', value === 'all' ? '' : value)}
+                        disabled={!formData.region_province}
+                      >
+                        <SelectTrigger><SelectValue placeholder="不限城市" /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">不限城市</SelectItem>
+                          {cityOptions.map(city => (
+                            <SelectItem key={city} value={city}>{city}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="district">区县</Label>
+                      <Input id="district" value={formData.region_district} onChange={e => updateForm('region_district', e.target.value)} placeholder="可选，如：邯山区" disabled={!formData.region_province} />
+                    </div>
+                  </CardContent>
+                </Card>
 
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <Label>发布时间范围</Label>
                     <Select value={formData.time_range} onValueChange={value => updateForm('time_range', value)}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="1hour">1 小时内</SelectItem>
                         <SelectItem value="24hours">24 小时内</SelectItem>
@@ -512,9 +513,7 @@ export default function Home() {
                   <div className="space-y-2">
                     <Label>排序方式</Label>
                     <Select value={formData.sort_type} onValueChange={value => updateForm('sort_type', value)}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="newest">最新上架</SelectItem>
                         <SelectItem value="price_asc">价格从低到高</SelectItem>
@@ -526,13 +525,8 @@ export default function Home() {
 
                 <div className="space-y-2">
                   <Label>扫描频率</Label>
-                  <Select
-                    value={formData.cron_expression}
-                    onValueChange={value => updateForm('cron_expression', value)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
+                  <Select value={formData.cron_expression} onValueChange={value => updateForm('cron_expression', value)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="0 */5 * * * *">每 5 分钟</SelectItem>
                       <SelectItem value="0 */10 * * * *">每 10 分钟</SelectItem>
@@ -552,48 +546,28 @@ export default function Home() {
                     <Cookie className="h-4 w-4" />
                     闲鱼 Cookie
                   </Label>
-                  <Textarea
-                    id="cookies"
-                    value={formData.cookies}
-                    onChange={e => updateForm('cookies', e.target.value)}
-                    rows={4}
-                    className="font-mono text-xs"
-                    placeholder="粘贴从浏览器复制的 Cookie 字符串或 JSON 导出内容"
-                  />
+                  <Textarea id="cookies" value={formData.cookies} onChange={e => updateForm('cookies', e.target.value)} rows={4} className="font-mono text-xs" placeholder="粘贴浏览器复制的 Cookie 字符串或 JSON 导出内容" />
                   <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-                    建议先在本地浏览器中确认已登录 goofish.com，再复制 Cookie。
-                    如果你准备复用本机用户目录，也可以只填少量 Cookie 作为补充。
+                    建议先在本地浏览器里确认已登录 goofish.com，再复制 Cookie。若你复用浏览器用户目录，Cookie 也可以只作为补充。
                   </div>
                 </div>
 
                 <div className="space-y-2">
                   <Label htmlFor="webhook">Webhook 通知地址</Label>
-                  <Input
-                    id="webhook"
-                    value={formData.webhook_url}
-                    onChange={e => updateForm('webhook_url', e.target.value)}
-                    placeholder="https://example.com/webhook"
-                  />
+                  <Input id="webhook" value={formData.webhook_url} onChange={e => updateForm('webhook_url', e.target.value)} placeholder="https://example.com/webhook" />
                 </div>
 
                 <Card className="border-slate-200 bg-slate-50/80">
                   <CardHeader>
                     <CardTitle className="text-base">浏览器调试配置</CardTitle>
-                    <CardDescription>
-                      这些选项会覆盖默认 `.env` 配置，按当前监控单独生效。
-                    </CardDescription>
+                    <CardDescription>这些选项会覆盖默认 `.env` 配置，仅对当前监控生效。</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-4">
                     <div className="grid gap-4 md:grid-cols-2">
                       <div className="space-y-2">
                         <Label>浏览器通道</Label>
-                        <Select
-                          value={formData.browser_channel}
-                          onValueChange={value => updateForm('browser_channel', value)}
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
+                        <Select value={formData.browser_channel} onValueChange={value => updateForm('browser_channel', value)}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
                           <SelectContent>
                             <SelectItem value="system">系统默认</SelectItem>
                             <SelectItem value="chrome">Chrome</SelectItem>
@@ -603,50 +577,30 @@ export default function Home() {
                       </div>
                       <div className="space-y-2">
                         <Label htmlFor="browserExec">浏览器可执行文件</Label>
-                        <Input
-                          id="browserExec"
-                          value={formData.browser_executable_path}
-                          onChange={e => updateForm('browser_executable_path', e.target.value)}
-                          placeholder="可选，例如 C:\Program Files\Google\Chrome\Application\chrome.exe"
-                        />
+                        <Input id="browserExec" value={formData.browser_executable_path} onChange={e => updateForm('browser_executable_path', e.target.value)} placeholder="例如 C:\Program Files\Google\Chrome\Application\chrome.exe" />
                       </div>
                     </div>
 
                     <div className="space-y-2">
                       <Label htmlFor="userDataDir">用户目录</Label>
-                      <Input
-                        id="userDataDir"
-                        value={formData.browser_user_data_dir}
-                        onChange={e => updateForm('browser_user_data_dir', e.target.value)}
-                        placeholder="可选，例如 C:\Users\你的用户名\AppData\Local\Microsoft\Edge\User Data"
-                      />
-                      <p className="text-xs text-slate-500">
-                        用于尝试复用本地登录态。最好先关闭对应浏览器，再用这个目录启动。
-                      </p>
+                      <Input id="userDataDir" value={formData.browser_user_data_dir} onChange={e => updateForm('browser_user_data_dir', e.target.value)} placeholder="例如 C:\Users\你的用户名\AppData\Local\Microsoft\Edge\User Data" />
+                      <p className="text-xs text-slate-500">用于尝试复用本地登录态，最好先关闭对应浏览器。</p>
                     </div>
 
                     <div className="grid gap-4 md:grid-cols-2">
                       <div className="flex items-center justify-between rounded-lg border bg-white p-3">
                         <div>
                           <p className="font-medium text-slate-900">无头模式</p>
-                          <p className="text-xs text-slate-500">关闭后会弹出真实浏览器窗口，便于观察搜索过程。</p>
+                          <p className="text-xs text-slate-500">关闭后会使用可视浏览器，方便排查筛选过程。</p>
                         </div>
-                        <Switch
-                          checked={formData.browser_headless}
-                          onCheckedChange={checked => updateForm('browser_headless', checked)}
-                        />
+                        <Switch checked={formData.browser_headless} onCheckedChange={checked => updateForm('browser_headless', checked)} />
                       </div>
                       <div className="flex items-center justify-between rounded-lg border bg-white p-3">
                         <div>
                           <p className="font-medium text-slate-900">保存调试文件</p>
-                          <p className="text-xs text-slate-500">
-                            在 `.next/debug/xianyu/` 里保存截图和 HTML。
-                          </p>
+                          <p className="text-xs text-slate-500">在 `.next/debug/xianyu/` 中保存截图和 HTML。</p>
                         </div>
-                        <Switch
-                          checked={formData.browser_save_debug}
-                          onCheckedChange={checked => updateForm('browser_save_debug', checked)}
-                        />
+                        <Switch checked={formData.browser_save_debug} onCheckedChange={checked => updateForm('browser_save_debug', checked)} />
                       </div>
                     </div>
                   </CardContent>
@@ -655,23 +609,13 @@ export default function Home() {
                 <div className="flex items-center justify-between rounded-lg border p-3">
                   <div>
                     <p className="font-medium text-slate-900">启用监控</p>
-                    <p className="text-xs text-slate-500">关闭后配置保留，但不会自动扫描。</p>
+                    <p className="text-xs text-slate-500">关闭后配置会保留，但不会自动扫描。</p>
                   </div>
-                  <Switch
-                    checked={formData.is_active}
-                    onCheckedChange={checked => updateForm('is_active', checked)}
-                  />
+                  <Switch checked={formData.is_active} onCheckedChange={checked => updateForm('is_active', checked)} />
                 </div>
 
                 <div className="flex gap-2 pt-2">
-                  <Button
-                    variant="outline"
-                    className="flex-1"
-                    onClick={() => {
-                      setShowForm(false);
-                      setEditingConfig(null);
-                    }}
-                  >
+                  <Button variant="outline" className="flex-1" onClick={() => { setShowForm(false); setEditingConfig(null); }}>
                     取消
                   </Button>
                   <Button className="flex-1" onClick={handleSave}>
@@ -693,19 +637,14 @@ export default function Home() {
                       <Terminal className="h-5 w-5" />
                       后台日志
                     </CardTitle>
-                    <CardDescription>用来检查浏览器启动方式、登录态、截图保存路径和提取结果。</CardDescription>
+                    <CardDescription>用来检查浏览器启动、区域筛选、登录态和抓取结果。</CardDescription>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setAutoRefresh(!autoRefresh)}
-                      className={autoRefresh ? 'bg-green-100 text-green-700' : ''}
-                    >
+                    <Button variant="outline" size="sm" onClick={() => setAutoRefresh(!autoRefresh)} className={autoRefresh ? 'bg-green-100 text-green-700' : ''}>
                       <RefreshCw className={`mr-1 h-4 w-4 ${autoRefresh ? 'animate-spin' : ''}`} />
                       {autoRefresh ? '自动刷新中' : '自动刷新'}
                     </Button>
-                    <Button variant="outline" size="sm" onClick={loadLogs} disabled={logsLoading}>
+                    <Button variant="outline" size="sm" onClick={() => void loadLogs()} disabled={logsLoading}>
                       <RefreshCw className={`mr-1 h-4 w-4 ${logsLoading ? 'animate-spin' : ''}`} />
                       刷新
                     </Button>
@@ -721,9 +660,7 @@ export default function Home() {
                     <div className="py-8 text-center text-slate-400">暂无日志</div>
                   ) : (
                     logs.map((log, index) => (
-                      <div key={index} className={`py-0.5 ${highlightLog(log)}`}>
-                        {log}
-                      </div>
+                      <div key={index} className={`py-0.5 ${highlightLog(log)}`}>{log}</div>
                     ))
                   )}
                 </div>

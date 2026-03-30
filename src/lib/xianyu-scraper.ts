@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { BrowserContext, Cookie, ElementHandle, Page } from 'playwright';
+import { BrowserContext, Cookie, ElementHandle, Locator, Page } from 'playwright';
 import {
   acquireBrowserLease,
   BrowserRuntimeOptions,
@@ -24,6 +24,9 @@ export interface SearchConfig {
   keyword: string;
   priceMin?: number;
   priceMax?: number;
+  regionProvince?: string;
+  regionCity?: string;
+  regionDistrict?: string;
   timeRange?: string;
   sortType?: string;
   cookies?: string;
@@ -107,11 +110,9 @@ export class XianyuScraper {
       const pageTitle = await page.title().catch(() => '');
       console.log(`[scraper] 当前页面标题: ${pageTitle}`);
 
-      const loginButton = await page.getByText('登录').first().isVisible().catch(() => false);
-      if (loginButton) {
-        console.warn(
-          '[scraper] 检测到登录按钮，Cookie 可能已过期，或当前浏览器上下文没有继承本机登录态',
-        );
+      const loginButtonVisible = await page.getByText('登录').first().isVisible().catch(() => false);
+      if (loginButtonVisible) {
+        console.warn('[scraper] 检测到登录按钮，Cookie 可能已过期或当前上下文没有继承登录态');
       }
 
       await this.saveDebugArtifacts(page, 'search');
@@ -144,7 +145,8 @@ export class XianyuScraper {
         overrides?.saveDebugArtifacts ?? this.readBooleanEnv('COZE_BROWSER_SAVE_DEBUG', true),
       startMinimized:
         overrides?.startMinimized ?? this.readBooleanEnv('COZE_BROWSER_START_MINIMIZED', true),
-      idleCloseMs: overrides?.idleCloseMs ?? this.readNumberEnv('COZE_BROWSER_IDLE_CLOSE_MS', 900000),
+      idleCloseMs:
+        overrides?.idleCloseMs ?? this.readNumberEnv('COZE_BROWSER_IDLE_CLOSE_MS', 900000),
     };
   }
 
@@ -257,6 +259,13 @@ export class XianyuScraper {
       .waitForSelector('.search-container--eigqxPi6', { timeout: 15000 })
       .catch(() => undefined);
 
+    await this.applyRegionFilter(
+      page,
+      config.regionProvince,
+      config.regionCity,
+      config.regionDistrict,
+    );
+
     if (config.sortType === 'newest') {
       await this.selectDropdownOption(page, '新发布', this.mapTimeRangeLabel(config.timeRange));
     }
@@ -274,6 +283,130 @@ export class XianyuScraper {
     await this.toggleCheckboxByLabel(page, '个人闲置');
     await page.waitForTimeout(2500);
     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => undefined);
+  }
+
+  private async applyRegionFilter(
+    page: Page,
+    province?: string,
+    city?: string,
+    district?: string,
+  ) {
+    if (!province && !city && !district) {
+      return;
+    }
+
+    console.log(
+      `[scraper] 准备应用区域筛选: province=${province || '-'}, city=${city || '-'}, district=${district || '-'}`,
+    );
+
+    const openers = [
+      page.locator('text=地区').first(),
+      page.locator('text=选地区').first(),
+      page.locator('[class*="location"]').filter({ hasText: /地区|选地区|位置/ }).first(),
+    ];
+
+    let opened = false;
+    for (const opener of openers) {
+      if ((await opener.count()) === 0) {
+        continue;
+      }
+
+      try {
+        await opener.click({ timeout: 3000 });
+        opened = true;
+        break;
+      } catch {
+        continue;
+      }
+    }
+
+    if (!opened) {
+      console.warn('[scraper] 未找到区域筛选入口');
+      return;
+    }
+
+    await page.waitForTimeout(500);
+
+    const modal = page
+      .locator('body')
+      .locator(':scope')
+      .filter({ hasText: /选地区|搜附近|常用地址/ })
+      .last();
+
+    if (!(await modal.count())) {
+      console.warn('[scraper] 区域筛选弹层未出现');
+      return;
+    }
+
+    if (province) {
+      const matched = await this.clickRegionOption(page, province);
+      if (!matched) {
+        console.warn(`[scraper] 未找到省份选项: ${province}`);
+      }
+      await page.waitForTimeout(400);
+    }
+
+    if (city) {
+      const matched = await this.clickRegionOption(page, city);
+      if (!matched) {
+        console.warn(`[scraper] 未找到城市选项: ${city}`);
+      }
+      await page.waitForTimeout(400);
+    }
+
+    if (district) {
+      const matched = await this.clickRegionOption(page, district);
+      if (!matched) {
+        console.warn(`[scraper] 未找到区县选项: ${district}`);
+      }
+      await page.waitForTimeout(400);
+    }
+
+    const confirmButton = page
+      .locator('button')
+      .filter({ hasText: /查看.*件宝贝|确定|完成/ })
+      .first();
+
+    if ((await confirmButton.count()) > 0) {
+      await confirmButton.click().catch(() => undefined);
+    } else {
+      await page.keyboard.press('Escape').catch(() => undefined);
+    }
+
+    console.log('[scraper] 已尝试应用区域筛选');
+    await page.waitForTimeout(1500);
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => undefined);
+  }
+
+  private async clickRegionOption(page: Page, label: string): Promise<boolean> {
+    const exactCandidates = [
+      page.locator('div,span,li').filter({ hasText: new RegExp(`^${this.escapeRegExp(label)}$`) }),
+      page.locator('text=' + label),
+    ];
+
+    for (const candidate of exactCandidates) {
+      const count = await candidate.count().catch(() => 0);
+      for (let index = 0; index < count; index += 1) {
+        const item = candidate.nth(index);
+        if (!(await item.isVisible().catch(() => false))) {
+          continue;
+        }
+
+        try {
+          await item.click({ timeout: 2000 });
+          console.log(`[scraper] 已点击区域选项: ${label}`);
+          return true;
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   private mapTimeRangeLabel(timeRange?: string): string {

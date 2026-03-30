@@ -1,4 +1,4 @@
-import { BrowserContext, BrowserContextOptions, chromium, LaunchOptions, Page } from 'playwright';
+import { Browser, BrowserContext, BrowserContextOptions, chromium, LaunchOptions, Page } from 'playwright';
 
 export interface BrowserRuntimeOptions {
   headless: boolean;
@@ -14,16 +14,6 @@ interface BrowserLease {
   context: BrowserContext;
   release: () => Promise<void>;
 }
-
-interface ManagedContextEntry {
-  context: BrowserContext;
-  refCount: number;
-  idleTimer: NodeJS.Timeout | null;
-  options: BrowserRuntimeOptions;
-  keepAlivePage: Page | null;
-}
-
-const managedContexts = new Map<string, ManagedContextEntry>();
 
 function buildLaunchArgs(options: BrowserRuntimeOptions): string[] {
   const args = [
@@ -59,16 +49,6 @@ function buildContextOptions(): BrowserContextOptions {
   };
 }
 
-function buildContextKey(options: BrowserRuntimeOptions): string {
-  return JSON.stringify({
-    headless: options.headless,
-    channel: options.channel || null,
-    executablePath: options.executablePath || null,
-    userDataDir: options.userDataDir || null,
-    startMinimized: options.startMinimized,
-  });
-}
-
 export async function minimizePageWindow(page: Page) {
   try {
     const cdpSession = await page.context().newCDPSession(page);
@@ -83,55 +63,10 @@ export async function minimizePageWindow(page: Page) {
   }
 }
 
-async function ensureKeepAlivePage(entry: ManagedContextEntry) {
-  const currentPage = entry.keepAlivePage;
-  if (currentPage && !currentPage.isClosed()) {
-    if (!entry.options.headless && entry.options.startMinimized) {
-      await minimizePageWindow(currentPage);
-    }
-    return;
-  }
-
-  const page = await entry.context.newPage();
-  await page.goto('about:blank').catch(() => undefined);
-  entry.keepAlivePage = page;
-
-  if (!entry.options.headless && entry.options.startMinimized) {
-    await minimizePageWindow(page);
-  }
-}
-
-async function closeManagedContext(key: string) {
-  const entry = managedContexts.get(key);
-  if (!entry || entry.refCount > 0) {
-    return;
-  }
-
-  if (entry.idleTimer) {
-    clearTimeout(entry.idleTimer);
-  }
-
-  managedContexts.delete(key);
-  await entry.context.close().catch(() => undefined);
-  console.log(`[browser] 已关闭空闲浏览器上下文: key=${key}`);
-}
-
-function scheduleContextClose(key: string, idleCloseMs: number) {
-  const entry = managedContexts.get(key);
-  if (!entry || entry.refCount > 0) {
-    return;
-  }
-
-  if (entry.idleTimer) {
-    clearTimeout(entry.idleTimer);
-  }
-
-  entry.idleTimer = setTimeout(() => {
-    void closeManagedContext(key);
-  }, idleCloseMs);
-}
-
-async function createManagedContext(options: BrowserRuntimeOptions): Promise<ManagedContextEntry> {
+export async function acquireBrowserLease(
+  options: BrowserRuntimeOptions,
+): Promise<BrowserLease> {
+  let browser: Browser | null = null;
   let context: BrowserContext;
 
   if (options.userDataDir) {
@@ -144,72 +79,24 @@ async function createManagedContext(options: BrowserRuntimeOptions): Promise<Man
     });
   } else {
     console.log(
-      `[browser] 创建共享浏览器上下文: headless=${options.headless}, channel=${options.channel || 'system'}, minimized=${options.startMinimized}`,
+      `[browser] 创建独立浏览器实例: headless=${options.headless}, channel=${options.channel || 'system'}, minimized=${options.startMinimized}`,
     );
-    const browser = await chromium.launch(buildLaunchOptions(options));
+    browser = await chromium.launch(buildLaunchOptions(options));
     context = await browser.newContext(buildContextOptions());
   }
 
-  const entry: ManagedContextEntry = {
-    context,
-    refCount: 0,
-    idleTimer: null,
-    options,
-    keepAlivePage: null,
-  };
-
-  await ensureKeepAlivePage(entry);
-  return entry;
-}
-
-export async function acquireBrowserLease(
-  options: BrowserRuntimeOptions,
-): Promise<BrowserLease> {
-  const key = buildContextKey(options);
-  let entry = managedContexts.get(key);
-
-  if (!entry) {
-    entry = await createManagedContext(options);
-    managedContexts.set(key, entry);
-  } else {
-    console.log(
-      `[browser] 复用浏览器上下文: channel=${options.channel || 'system'}, headless=${options.headless}, activeRefs=${entry.refCount}`,
-    );
-    await ensureKeepAlivePage(entry);
-  }
-
-  if (entry.idleTimer) {
-    clearTimeout(entry.idleTimer);
-    entry.idleTimer = null;
-  }
-
-  entry.refCount += 1;
-
   return {
-    context: entry.context,
+    context,
     release: async () => {
-      const current = managedContexts.get(key);
-      if (!current) {
-        return;
+      await context.close().catch(() => undefined);
+      if (browser) {
+        await browser.close().catch(() => undefined);
       }
-
-      current.refCount = Math.max(0, current.refCount - 1);
-      await ensureKeepAlivePage(current);
-      scheduleContextClose(key, current.options.idleCloseMs);
+      console.log('[browser] 本次任务浏览器已关闭');
     },
   };
 }
 
 export async function closeAllManagedBrowsers() {
-  const entries = Array.from(managedContexts.values());
-  managedContexts.clear();
-
-  await Promise.all(
-    entries.map(async entry => {
-      if (entry.idleTimer) {
-        clearTimeout(entry.idleTimer);
-      }
-      await entry.context.close().catch(() => undefined);
-    }),
-  );
+  return;
 }

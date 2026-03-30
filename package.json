@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "build": "bash ./scripts/build.sh",
-    "dev": "bash ./scripts/dev.sh",
+    "dev": "node ./scripts/dev.mjs",
     "preinstall": "npx only-allow pnpm",
     "lint": "eslint",
     "start": "bash ./scripts/start.sh",

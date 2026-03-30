@@ -1,26 +1,36 @@
-import { chromium, Browser, Page, BrowserContext, Cookie } from 'playwright';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { chromium, Browser, BrowserContext, Cookie, Page } from 'playwright';
 import { getSupabaseClient } from '@/storage/database/supabase-client';
 
 export interface Product {
   id: string;
   title: string;
-  price: number; // 单位：分
+  price: number;
   url: string;
   imageUrl: string;
   publishTime?: string;
   location?: string;
 }
 
+interface BrowserRuntimeOptions {
+  headless: boolean;
+  channel?: 'chrome' | 'msedge';
+  executablePath?: string;
+  userDataDir?: string;
+  saveDebugArtifacts: boolean;
+}
+
 export interface SearchConfig {
   keyword: string;
   priceMin?: number;
   priceMax?: number;
-  timeRange?: string; // "1hour", "24hours", "7days"
-  sortType?: string; // "newest", "price_asc", "price_desc"
-  cookies?: string; // Cookie 字符串或 JSON 格式
+  timeRange?: string;
+  sortType?: string;
+  cookies?: string;
+  browserOptions?: Partial<BrowserRuntimeOptions>;
 }
 
-// JSON 格式的 Cookie 导出结构（浏览器插件格式）
 interface CookieExport {
   cookies?: Array<{
     name: string;
@@ -32,51 +42,95 @@ interface CookieExport {
     secure?: boolean;
     sameSite?: string;
   }>;
-  headers?: Record<string, string>;
 }
 
 export class XianyuScraper {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
+  private runtimeOptions: BrowserRuntimeOptions = this.getRuntimeOptions();
 
-  async init(cookies?: string) {
-    this.browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-      ],
-    });
+  async init(cookies?: string, overrides?: Partial<BrowserRuntimeOptions>) {
+    this.runtimeOptions = this.getRuntimeOptions(overrides);
 
-    // 使用桌面版 User-Agent，更稳定
-    this.context = await this.browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    const launchArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+    ];
+
+    const contextOptions = {
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       viewport: { width: 1920, height: 1080 },
       locale: 'zh-CN',
-    });
+    };
 
-    // 设置 Cookie
+    if (this.runtimeOptions.userDataDir) {
+      console.log(
+        `使用持久化浏览器上下文: ${this.runtimeOptions.userDataDir}，headless=${this.runtimeOptions.headless}`,
+      );
+      this.context = await chromium.launchPersistentContext(this.runtimeOptions.userDataDir, {
+        headless: this.runtimeOptions.headless,
+        args: launchArgs,
+        channel: this.runtimeOptions.channel,
+        executablePath: this.runtimeOptions.executablePath,
+        ...contextOptions,
+      });
+      this.browser = this.context.browser();
+    } else {
+      console.log(
+        `使用隔离浏览器上下文: headless=${this.runtimeOptions.headless}${this.runtimeOptions.channel ? `, channel=${this.runtimeOptions.channel}` : ''}`,
+      );
+      this.browser = await chromium.launch({
+        headless: this.runtimeOptions.headless,
+        args: launchArgs,
+        channel: this.runtimeOptions.channel,
+        executablePath: this.runtimeOptions.executablePath,
+      });
+      this.context = await this.browser.newContext(contextOptions);
+    }
+
     if (cookies && this.context) {
       await this.setCookies(cookies);
     }
   }
 
-  /**
-   * 解析并设置 Cookie（支持多种格式）
-   */
+  private getRuntimeOptions(overrides?: Partial<BrowserRuntimeOptions>): BrowserRuntimeOptions {
+    const channelValue = overrides?.channel ?? process.env.COZE_BROWSER_CHANNEL?.trim();
+    const channel =
+      channelValue === 'chrome' || channelValue === 'msedge' ? channelValue : undefined;
+
+    return {
+      headless: overrides?.headless ?? this.readBooleanEnv('COZE_BROWSER_HEADLESS', false),
+      channel,
+      executablePath:
+        overrides?.executablePath ?? (process.env.COZE_BROWSER_EXECUTABLE_PATH?.trim() || undefined),
+      userDataDir:
+        overrides?.userDataDir ?? (process.env.COZE_BROWSER_USER_DATA_DIR?.trim() || undefined),
+      saveDebugArtifacts:
+        overrides?.saveDebugArtifacts ?? this.readBooleanEnv('COZE_BROWSER_SAVE_DEBUG', true),
+    };
+  }
+
+  private readBooleanEnv(key: string, defaultValue: boolean): boolean {
+    const raw = process.env[key];
+    if (!raw) {
+      return defaultValue;
+    }
+
+    return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
+  }
+
   private async setCookies(cookieString: string) {
     if (!this.context) return;
 
     try {
       let cookies: Cookie[] = [];
 
-      // 尝试解析为 JSON 格式（浏览器插件导出格式）
       if (cookieString.trim().startsWith('{') || cookieString.trim().startsWith('[')) {
         try {
           const jsonExport: CookieExport = JSON.parse(cookieString);
-          
           if (jsonExport.cookies && Array.isArray(jsonExport.cookies)) {
             cookies = jsonExport.cookies.map(cookie => ({
               name: cookie.name,
@@ -91,25 +145,28 @@ export class XianyuScraper {
             console.log(`解析 JSON 格式 Cookie，共 ${cookies.length} 个`);
           }
         } catch {
-          console.log('JSON 解析失败，尝试字符串格式');
+          console.log('JSON Cookie 解析失败，尝试字符串格式');
         }
       }
 
-      // 如果 JSON 解析失败或不是 JSON 格式，尝试字符串格式
       if (cookies.length === 0) {
-        cookies = cookieString.split(';').map(cookie => {
-          const [name, ...valueParts] = cookie.trim().split('=');
-          return {
-            name: name.trim(),
-            value: valueParts.join('=').trim(),
-            domain: '.goofish.com',
-            path: '/',
-            expires: -1,
-            httpOnly: false,
-            secure: true,
-            sameSite: 'None' as const,
-          };
-        });
+        cookies = cookieString
+          .split(';')
+          .map(cookie => cookie.trim())
+          .filter(Boolean)
+          .map(cookie => {
+            const [name, ...valueParts] = cookie.split('=');
+            return {
+              name: name.trim(),
+              value: valueParts.join('=').trim(),
+              domain: '.goofish.com',
+              path: '/',
+              expires: -1,
+              httpOnly: false,
+              secure: true,
+              sameSite: 'None' as const,
+            };
+          });
         console.log(`解析字符串格式 Cookie，共 ${cookies.length} 个`);
       }
 
@@ -121,56 +178,74 @@ export class XianyuScraper {
   }
 
   async close() {
+    if (this.context) {
+      await this.context.close().catch(() => undefined);
+    }
     if (this.browser) {
-      await this.browser.close();
-      this.browser = null;
-      this.context = null;
+      await this.browser.close().catch(() => undefined);
+    }
+    this.browser = null;
+    this.context = null;
+  }
+
+  private async saveDebugArtifacts(page: Page, prefix: string) {
+    if (!this.runtimeOptions.saveDebugArtifacts) {
+      return;
+    }
+
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const debugDir = resolve(process.cwd(), '.next', 'debug', 'xianyu');
+      const screenshotPath = resolve(debugDir, `${timestamp}-${prefix}.png`);
+      const htmlPath = resolve(debugDir, `${timestamp}-${prefix}.html`);
+
+      await mkdir(debugDir, { recursive: true });
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      await writeFile(htmlPath, await page.content(), 'utf8');
+
+      console.log(`调试截图已保存: ${screenshotPath}`);
+      console.log(`调试 HTML 已保存: ${htmlPath}`);
+    } catch (error) {
+      console.error('保存调试产物失败:', error);
     }
   }
 
   async search(config: SearchConfig): Promise<Product[]> {
     if (!this.context) {
-      await this.init(config.cookies);
+      await this.init(config.cookies, config.browserOptions);
     }
 
     const page = await this.context!.newPage();
-    
+
     try {
-      // 先访问首页，确保 Cookie 生效
       console.log('访问闲鱼首页...');
-      await page.goto('https://www.goofish.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.goto('https://www.goofish.com/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      });
       await page.waitForTimeout(2000);
 
-      // 构建搜索 URL
       const searchUrl = this.buildSearchUrl(config);
       console.log('搜索 URL:', searchUrl);
 
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-      // 等待页面加载
       await page.waitForTimeout(3000);
+      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => undefined);
+      await this.applySearchFilters(page, config);
 
-      // 检查是否需要登录
+      const pageTitle = await page.title().catch(() => '');
+      console.log(`当前页面标题: ${pageTitle}`);
+
       const loginButton = await page.$('text=登录');
       if (loginButton) {
-        console.warn('检测到登录按钮，Cookie 可能已过期');
+        console.warn('检测到登录按钮，Cookie 可能已过期，或当前浏览器上下文没有继承本机登录态');
       }
 
-      // 截图调试
-      const screenshot = await page.screenshot({ fullPage: false });
-      console.log(`页面截图大小: ${screenshot.length} bytes`);
-
-      // 提取商品信息
-      const products = await this.extractProducts(page, config);
-
-      return products;
+      await this.saveDebugArtifacts(page, 'search');
+      return await this.extractProducts(page, config);
     } catch (error) {
       console.error('搜索失败:', error);
-      // 失败时截图保存
-      try {
-        const errorScreenshot = await page.screenshot({ fullPage: false });
-        console.log(`错误截图大小: ${errorScreenshot.length} bytes`);
-      } catch {}
+      await this.saveDebugArtifacts(page, 'error');
       throw error;
     } finally {
       await page.close();
@@ -180,149 +255,186 @@ export class XianyuScraper {
   private buildSearchUrl(config: SearchConfig): string {
     const params = new URLSearchParams();
     params.append('q', config.keyword);
-    
-    // 价格过滤
-    if (config.priceMin) {
-      params.append('priceStart', String(config.priceMin));
-    }
-    if (config.priceMax) {
-      params.append('priceEnd', String(config.priceMax));
-    }
-
-    // 排序方式
-    if (config.sortType === 'newest') {
-      params.append('sort', '_ctime');
-    } else if (config.sortType === 'price_asc') {
-      params.append('sort', 'price');
-    } else if (config.sortType === 'price_desc') {
-      params.append('sort', 'price_reverse');
-    }
-
-    // 闲鱼搜索 URL
     return `https://www.goofish.com/search?${params.toString()}`;
   }
 
-  private async extractProducts(page: Page, config: SearchConfig): Promise<Product[]> {
-    const products: Product[] = [];
+  private async applySearchFilters(page: Page, config: SearchConfig) {
+    await page.waitForSelector('.search-container--eigqxPi6', { timeout: 15000 }).catch(() => undefined);
 
-    // 多种选择器尝试
-    const itemSelectors = [
-      // 新版页面结构
-      '[class*="ItemCard"]',
-      '[class*="itemCard"]', 
-      '[class*="item-card"]',
-      '[class*="Item--"]',
-      // 搜索结果
-      '[class*="search-item"]',
-      '[class*="SearchItem"]',
-      // 通用商品卡片
-      '[class*="goods-item"]',
-      '[class*="product-item"]',
-      // 链接形式
-      'a[href*="/item"]',
-      'a[href*="itemId"]',
-    ];
-
-    let items: any[] = [];
-    for (const selector of itemSelectors) {
-      try {
-        items = await page.$$(selector);
-        if (items.length > 0) {
-          console.log(`使用选择器 ${selector} 找到 ${items.length} 个商品`);
-          break;
-        }
-      } catch (error) {
-        console.log(`选择器 ${selector} 失败:`, error);
-      }
+    if (config.sortType === 'newest') {
+      await this.selectDropdownOption(page, '新发布', this.mapTimeRangeLabel(config.timeRange));
     }
 
-    if (items.length === 0) {
-      console.log('未找到商品，尝试获取页面内容');
-      const content = await page.content();
-      console.log(`页面内容长度: ${content.length}`);
-      
-      // 检查是否有验证码或其他拦截
-      if (content.includes('验证码') || content.includes('安全验证')) {
-        console.warn('检测到验证码拦截');
+    if (config.sortType === 'price_asc') {
+      await this.selectDropdownOption(page, '价格', '价格从低到高');
+    } else if (config.sortType === 'price_desc') {
+      await this.selectDropdownOption(page, '价格', '价格从高到低');
+    }
+
+    if (config.priceMin || config.priceMax) {
+      await this.fillPriceRange(page, config.priceMin, config.priceMax);
+    }
+
+    await this.toggleCheckboxByLabel(page, '个人闲置');
+    await page.waitForTimeout(2500);
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => undefined);
+  }
+
+  private mapTimeRangeLabel(timeRange?: string): string {
+    const labels: Record<string, string> = {
+      '1hour': '最新',
+      '24hours': '1天内',
+      '7days': '7天内',
+    };
+    return labels[timeRange || ''] || '最新';
+  }
+
+  private async selectDropdownOption(page: Page, title: string, option: string) {
+    const dropdown = page.locator('.search-select-container--ANusUe9S').filter({ hasText: title }).first();
+    if ((await dropdown.count()) === 0) {
+      console.warn(`未找到筛选下拉框: ${title}`);
+      return;
+    }
+
+    await dropdown.click().catch(() => undefined);
+    await page.waitForTimeout(300);
+
+    const optionLocator = page.locator('.search-select-item--H_AJBURX').filter({ hasText: option }).first();
+    if ((await optionLocator.count()) === 0) {
+      console.warn(`未找到筛选项: ${title} -> ${option}`);
+      return;
+    }
+
+    await optionLocator.click().catch(() => undefined);
+    console.log(`已应用筛选: ${title} -> ${option}`);
+    await page.waitForTimeout(1200);
+  }
+
+  private async fillPriceRange(page: Page, priceMin?: number, priceMax?: number) {
+    const inputs = page.locator('.search-price-input--p1NQEAuz');
+    if ((await inputs.count()) < 2) {
+      console.warn('未找到价格输入框');
+      return;
+    }
+
+    if (priceMin) {
+      await inputs.nth(0).fill(String(priceMin)).catch(() => undefined);
+    }
+    if (priceMax) {
+      await inputs.nth(1).fill(String(priceMax)).catch(() => undefined);
+    }
+
+    const confirmButton = page.locator('.search-price-confirm-button--I2ThavjG').first();
+    await confirmButton.click().catch(() => undefined);
+    console.log(`已填写价格区间: ${priceMin ?? ''}-${priceMax ?? ''}`);
+    await page.waitForTimeout(1500);
+  }
+
+  private async toggleCheckboxByLabel(page: Page, label: string) {
+    const checkboxItem = page.locator('.search-checkbox-item-container--DsTIZUle').filter({ hasText: label }).first();
+    if ((await checkboxItem.count()) === 0) {
+      console.warn(`未找到复选框: ${label}`);
+      return;
+    }
+
+    await checkboxItem.click().catch(() => undefined);
+    console.log(`已尝试勾选复选框: ${label}`);
+    await page.waitForTimeout(1000);
+  }
+
+  private async extractProducts(page: Page, config: SearchConfig): Promise<Product[]> {
+    const products = new Map<string, Product>();
+    const itemSelectors = [
+      '.feeds-item-wrap--rGdH_KoF',
+      '[class*="search-item"]',
+      '[class*="SearchItem"]',
+      '[class*="goods-item"]',
+      '[class*="product-item"]',
+      'a[href*="/item"]',
+      'a[href*="item?id="]',
+    ];
+
+    let items: Array<Awaited<ReturnType<Page['$$']>>[number]> = [];
+    for (const selector of itemSelectors) {
+      items = await page.$$(selector).catch(() => []);
+      if (items.length > 0) {
+        console.log(`使用选择器 ${selector} 找到 ${items.length} 个候选节点`);
+        break;
       }
-      
-      return [];
     }
 
     for (const item of items) {
-      try {
-        const product = await this.extractProductInfo(item);
-        if (product && this.matchFilter(product, config)) {
-          products.push(product);
-        }
-      } catch (error) {
-        console.error('提取商品信息失败:', error);
+      const product = await this.extractProductInfo(item);
+      if (product && this.matchFilter(product, config)) {
+        products.set(product.id, product);
       }
     }
 
-    return products;
+    const pageLevelProducts = await this.extractProductsFromPage(page);
+    console.log(`页面级链接扫描提取到 ${pageLevelProducts.length} 个候选商品`);
+    for (const product of pageLevelProducts) {
+      if (this.matchFilter(product, config)) {
+        products.set(product.id, product);
+      }
+    }
+
+    console.log(`最终提取到 ${products.size} 个商品`);
+    return [...products.values()];
   }
 
-  private async extractProductInfo(item: any): Promise<Product | null> {
+  private async extractProductInfo(item: Awaited<ReturnType<Page['$$']>>[number]): Promise<Product | null> {
     try {
-      // 提取链接和 ID
-      const link = await item.getAttribute('href');
-      if (!link) {
-        // 尝试从子元素获取链接
-        const linkElement = await item.$('a');
-        if (linkElement) {
-          const childLink = await linkElement.getAttribute('href');
-          if (childLink) {
-            const idMatch = childLink.match(/itemId=(\d+)|\/item\/(\d+)|id=(\d+)/);
-            const id = idMatch ? (idMatch[1] || idMatch[2] || idMatch[3]) : null;
-            if (id) {
-              const title = await item.textContent() || '';
-              const priceElement = await item.$('[class*="price"], [class*="Price"]');
-              const priceText = priceElement ? await priceElement.textContent() : '0';
-              const price = this.parsePrice(priceText);
-              
-              return {
-                id,
-                title: title.trim().slice(0, 100),
-                price,
-                url: childLink.startsWith('http') ? childLink : `https://www.goofish.com${childLink}`,
-                imageUrl: '',
-              };
-            }
-          }
-        }
+      const info = await item.evaluate(node => {
+        const root = node as HTMLElement;
+        const linkElement = root.matches('a[href]') ? root : root.querySelector('a[href]');
+        const href = linkElement?.getAttribute('href') || '';
+        const title =
+          root.querySelector('[class*="main-title"]')?.textContent ||
+          root.querySelector('[class*="title"]')?.textContent ||
+          root.textContent ||
+          '';
+        const priceRoot =
+          root.querySelector('[class*="row3-wrap-price"]') ||
+          root.querySelector('[class*="price-wrap"]') ||
+          root.querySelector('[class*="price"]');
+        const priceText = priceRoot?.textContent || '';
+        const publishTimeNode =
+          root.querySelector('[class*="row2-wrap-service"] [title]') ||
+          root.querySelector('[class*="row2-wrap-service"] span') ||
+          root.querySelector('[class*="row2-wrap-cpv"] [title]');
+        const publishTime =
+          publishTimeNode?.getAttribute?.('title') ||
+          publishTimeNode?.textContent ||
+          '';
+        const imageUrl = root.querySelector('img')?.getAttribute('src') || '';
+        const location =
+          root.querySelector('[class*="seller-text--"]')?.textContent ||
+          root.querySelector('[class*="seller-left"]')?.textContent ||
+          '';
+        return {
+          href,
+          title: title.replace(/\s+/g, ' ').trim(),
+          priceText: priceText.replace(/\s+/g, ' ').trim(),
+          publishTime: publishTime.replace(/\s+/g, ' ').trim(),
+          imageUrl,
+          location: location.replace(/\s+/g, ' ').trim(),
+        };
+      });
+
+      const url = this.normalizeUrl(info.href);
+      const id = this.extractProductId(url);
+      if (!id) {
         return null;
       }
 
-      // 从链接中提取商品 ID
-      const idMatch = link.match(/itemId=(\d+)|\/item\/(\d+)|id=(\d+)/);
-      const id = idMatch ? (idMatch[1] || idMatch[2] || idMatch[3]) : null;
-      if (!id) return null;
-
-      // 提取标题
-      const titleElement = await item.$('[class*="title"], [class*="Title"], [class*="name"], h3, h4');
-      const title = titleElement ? await titleElement.textContent() : await item.textContent() || '';
-
-      // 提取价格
-      const priceElement = await item.$('[class*="price"], [class*="Price"], [class*="Price--"]');
-      const priceText = priceElement ? await priceElement.textContent() : '0';
-      const price = this.parsePrice(priceText);
-
-      // 提取图片
-      const imgElement = await item.$('img');
-      const imageUrl = imgElement ? await imgElement.getAttribute('src') : '';
-
-      // 构建完整 URL
-      const url = link.startsWith('http') ? link : `https://www.goofish.com${link}`;
-
-      console.log(`提取商品: ID=${id}, 标题=${title?.slice(0, 20)}..., 价格=${price/100}元`);
-
       return {
         id,
-        title: title?.trim() || '',
-        price,
-        url,
-        imageUrl: imageUrl || '',
+        title: info.title.slice(0, 100),
+        price: this.parsePrice(info.priceText),
+        url: url || '',
+        imageUrl: this.normalizeUrl(info.imageUrl) || '',
+        publishTime: info.publishTime || undefined,
+        location: info.location || undefined,
       };
     } catch (error) {
       console.error('提取商品信息异常:', error);
@@ -330,29 +442,134 @@ export class XianyuScraper {
     }
   }
 
+  private async extractProductsFromPage(page: Page): Promise<Product[]> {
+    const candidates = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('.feeds-item-wrap--rGdH_KoF, a[href*="item?id="]'))
+        .map(node => {
+          const root = node as HTMLElement;
+          const href = root.getAttribute('href') || root.querySelector('a[href]')?.getAttribute('href') || '';
+          const title =
+            root.querySelector('[class*="main-title"]')?.textContent ||
+            root.querySelector('[class*="title"]')?.textContent ||
+            root.textContent ||
+            '';
+          const priceText =
+            root.querySelector('[class*="row3-wrap-price"]')?.textContent ||
+            root.querySelector('[class*="price-wrap"]')?.textContent ||
+            root.querySelector('[class*="price"]')?.textContent ||
+            '';
+          const publishTimeNode =
+            root.querySelector('[class*="row2-wrap-service"] [title]') ||
+            root.querySelector('[class*="row2-wrap-service"] span') ||
+            root.querySelector('[class*="row2-wrap-cpv"] [title]');
+          const publishTime =
+            publishTimeNode?.getAttribute?.('title') ||
+            publishTimeNode?.textContent ||
+            '';
+          const imageUrl = root.querySelector('img')?.getAttribute('src') || '';
+          const location =
+            root.querySelector('[class*="seller-text--"]')?.textContent ||
+            root.querySelector('[class*="seller-left"]')?.textContent ||
+            '';
+          return {
+            href,
+            title: title.replace(/\s+/g, ' ').trim(),
+            priceText: priceText.replace(/\s+/g, ' ').trim(),
+            publishTime: publishTime.replace(/\s+/g, ' ').trim(),
+            imageUrl,
+            location: location.replace(/\s+/g, ' ').trim(),
+          };
+        })
+        .filter(item => item.href);
+    });
+
+    const products = new Map<string, Product>();
+    for (const candidate of candidates) {
+      const url = this.normalizeUrl(candidate.href);
+      const id = this.extractProductId(url);
+      if (!id) {
+        continue;
+      }
+
+      products.set(id, {
+        id,
+        title: candidate.title.slice(0, 100) || `商品 ${id}`,
+        price: this.parsePrice(candidate.priceText),
+        url: url || '',
+        imageUrl: this.normalizeUrl(candidate.imageUrl) || '',
+        publishTime: candidate.publishTime || undefined,
+        location: candidate.location || undefined,
+      });
+    }
+
+    return [...products.values()];
+  }
+
+  private normalizeUrl(rawUrl: string | null | undefined): string | null {
+    if (!rawUrl) {
+      return null;
+    }
+
+    if (rawUrl.startsWith('//')) {
+      return `https:${rawUrl}`;
+    }
+
+    if (rawUrl.startsWith('/')) {
+      return `https://www.goofish.com${rawUrl}`;
+    }
+
+    return rawUrl;
+  }
+
+  private extractProductId(url: string | null): string | null {
+    if (!url) {
+      return null;
+    }
+
+    const patterns = [
+      /[?&](?:itemId|itemid|id)=([A-Za-z0-9_-]{6,})/i,
+      /\/item\/([A-Za-z0-9_-]{6,})/i,
+      /\/detail\/([A-Za-z0-9_-]{6,})/i,
+      /\/([0-9]{6,})(?:\?|$|\/)/,
+    ];
+
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match?.[1]) {
+        return match[1];
+      }
+    }
+
+    return null;
+  }
+
   private parsePrice(priceText: string): number {
-    // 移除货币符号和逗号，提取数字
-    const match = priceText.match(/[\d,.]+/);
-    if (!match) return 0;
-    
-    const price = parseFloat(match[0].replace(/,/g, ''));
-    return Math.round(price * 100); // 转换为分
+    const normalizedText = priceText.replace(/\s+/g, '');
+    const match = normalizedText.match(/[\d,.]+/);
+    if (!match) {
+      return 0;
+    }
+
+    let price = parseFloat(match[0].replace(/,/g, ''));
+    if (Number.isNaN(price)) {
+      return 0;
+    }
+
+    if (normalizedText.includes('万')) {
+      price *= 10000;
+    }
+
+    return Math.round(price * 100);
   }
 
   private matchFilter(product: Product, config: SearchConfig): boolean {
-    // 价格过滤（单位：分）
-    if (config.priceMin && product.price < config.priceMin * 100) {
-      return false;
-    }
-    if (config.priceMax && product.price > config.priceMax * 100) {
-      return false;
-    }
-
+    // Price filtering is applied through Goofish's own UI controls.
+    // We avoid local price filtering here because page text can vary
+    // (for example "2.88万"), which risks dropping valid results.
     return true;
   }
 }
 
-// 检查商品是否已发送
 export async function isProductSent(productId: string, configId: number): Promise<boolean> {
   const client = getSupabaseClient();
   const { data } = await client
@@ -361,15 +578,14 @@ export async function isProductSent(productId: string, configId: number): Promis
     .eq('product_id', productId)
     .eq('config_id', configId)
     .limit(1);
-  
+
   return (data?.length || 0) > 0;
 }
 
-// 记录已发送的商品
 export async function recordSentProduct(
   productId: string,
   configId: number,
-  product: Product
+  product: Product,
 ): Promise<void> {
   const client = getSupabaseClient();
   await client.from('sent_products').insert({
@@ -382,9 +598,11 @@ export async function recordSentProduct(
   });
 }
 
-// 创建带 Cookie 的爬虫实例
-export async function createScraper(cookies?: string): Promise<XianyuScraper> {
+export async function createScraper(
+  cookies?: string,
+  browserOptions?: Partial<BrowserRuntimeOptions>,
+): Promise<XianyuScraper> {
   const scraper = new XianyuScraper();
-  await scraper.init(cookies);
+  await scraper.init(cookies, browserOptions);
   return scraper;
 }

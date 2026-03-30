@@ -22,6 +22,11 @@ export async function PUT(
         webhook_url: body.webhook_url,
         cookies: body.cookies,
         is_active: body.is_active,
+        browser_headless: body.browser_headless ?? false,
+        browser_save_debug: body.browser_save_debug ?? true,
+        browser_channel: body.browser_channel,
+        browser_executable_path: body.browser_executable_path,
+        browser_user_data_dir: body.browser_user_data_dir,
         updated_at: new Date().toISOString(),
       })
       .eq('id', parseInt(id))

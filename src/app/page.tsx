@@ -1,31 +1,33 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  AlertCircle,
+  ArrowUpDown,
+  Bell,
+  Bug,
+  Clock,
+  Cookie,
+  DollarSign,
+  Edit,
+  Eye,
+  Play,
+  Plus,
+  RefreshCw,
+  Search,
+  Terminal,
+  Trash2,
+  X,
+} from 'lucide-react';
+import { toast } from 'sonner';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
-import { toast } from 'sonner';
-import { 
-  Plus, 
-  Play, 
-  Trash2, 
-  Edit, 
-  Search, 
-  Bell, 
-  Clock,
-  DollarSign,
-  ArrowUpDown,
-  Cookie,
-  AlertCircle,
-  Terminal,
-  RefreshCw,
-  X
-} from 'lucide-react';
 
 interface MonitorConfig {
   id: number;
@@ -38,49 +40,72 @@ interface MonitorConfig {
   webhook_url: string | null;
   cookies: string | null;
   is_active: boolean;
+  browser_headless: boolean | null;
+  browser_save_debug: boolean | null;
+  browser_channel: string | null;
+  browser_executable_path: string | null;
+  browser_user_data_dir: string | null;
   created_at: string;
-  updated_at: string;
+  updated_at: string | null;
 }
+
+interface FormDataState {
+  search_keyword: string;
+  price_min: string;
+  price_max: string;
+  time_range: string;
+  sort_type: string;
+  cron_expression: string;
+  webhook_url: string;
+  cookies: string;
+  is_active: boolean;
+  browser_headless: boolean;
+  browser_save_debug: boolean;
+  browser_channel: string;
+  browser_executable_path: string;
+  browser_user_data_dir: string;
+}
+
+const defaultFormData: FormDataState = {
+  search_keyword: '摩托车',
+  price_min: '20000',
+  price_max: '',
+  time_range: '1hour',
+  sort_type: 'newest',
+  cron_expression: '0 */30 * * * *',
+  webhook_url: '',
+  cookies: '',
+  is_active: true,
+  browser_headless: false,
+  browser_save_debug: true,
+  browser_channel: 'system',
+  browser_executable_path: '',
+  browser_user_data_dir: '',
+};
 
 export default function Home() {
   const [configs, setConfigs] = useState<MonitorConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingConfig, setEditingConfig] = useState<MonitorConfig | null>(null);
   const [showForm, setShowForm] = useState(false);
-  
-  // 日志相关状态
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
+  const [formData, setFormData] = useState<FormDataState>(defaultFormData);
 
-  // 表单数据
-  const [formData, setFormData] = useState({
-    search_keyword: '摩托车',
-    price_min: '20000',
-    price_max: '',
-    time_range: '1hour',
-    sort_type: 'newest',
-    cron_expression: '0 */30 * * * *',
-    webhook_url: '',
-    cookies: '',
-    is_active: true,
-  });
-
-  // 加载配置列表
   const loadConfigs = async () => {
     try {
       const response = await fetch('/api/configs');
       const data = await response.json();
       setConfigs(data.configs || []);
-    } catch (error) {
+    } catch {
       toast.error('加载配置失败');
     } finally {
       setLoading(false);
     }
   };
 
-  // 加载日志
   const loadLogs = useCallback(async () => {
     try {
       setLogsLoading(true);
@@ -98,105 +123,36 @@ export default function Home() {
     loadConfigs();
   }, []);
 
-  // 自动刷新日志
   useEffect(() => {
-    if (showLogs && autoRefresh) {
-      loadLogs();
-      const timer = setInterval(loadLogs, 3000);
-      return () => clearInterval(timer);
+    if (!showLogs || !autoRefresh) {
+      return;
     }
+
+    loadLogs();
+    const timer = setInterval(loadLogs, 3000);
+    return () => clearInterval(timer);
   }, [showLogs, autoRefresh, loadLogs]);
 
-  // 打开日志面板时加载日志
   useEffect(() => {
     if (showLogs) {
       loadLogs();
     }
   }, [showLogs, loadLogs]);
 
-  // 保存配置
-  const handleSave = async () => {
-    try {
-      const url = editingConfig ? `/api/configs/${editingConfig.id}` : '/api/configs';
-      const method = editingConfig ? 'PUT' : 'POST';
-
-      const response = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          search_keyword: formData.search_keyword,
-          price_min: formData.price_min ? parseInt(formData.price_min) : null,
-          price_max: formData.price_max ? parseInt(formData.price_max) : null,
-          time_range: formData.time_range || null,
-          sort_type: formData.sort_type || null,
-          cron_expression: formData.cron_expression,
-          webhook_url: formData.webhook_url || null,
-          cookies: formData.cookies || null,
-          is_active: formData.is_active,
-        }),
-      });
-
-      if (response.ok) {
-        toast.success(editingConfig ? '配置已更新' : '配置已创建');
-        setShowForm(false);
-        setEditingConfig(null);
-        resetForm();
-        loadConfigs();
-      } else {
-        const error = await response.json();
-        toast.error(error.message || '保存失败');
-      }
-    } catch (error) {
-      toast.error('保存失败');
-    }
+  const updateForm = <K extends keyof FormDataState>(key: K, value: FormDataState[K]) => {
+    setFormData(prev => ({ ...prev, [key]: value }));
   };
 
-  // 删除配置
-  const handleDelete = async (id: number) => {
-    if (!confirm('确定要删除这个监控配置吗？')) return;
-
-    try {
-      const response = await fetch(`/api/configs/${id}`, { method: 'DELETE' });
-      if (response.ok) {
-        toast.success('配置已删除');
-        loadConfigs();
-      }
-    } catch (error) {
-      toast.error('删除失败');
-    }
+  const resetForm = () => {
+    setFormData(defaultFormData);
   };
 
-  // 手动触发扫描
-  const handleTrigger = async (id: number) => {
-    try {
-      toast.info('开始扫描...');
-      const response = await fetch(`/api/trigger/${id}`, { method: 'POST' });
-      const data = await response.json();
-
-      if (response.ok) {
-        if (data.warning) {
-          toast.warning(data.warning.split('\n')[0]); // 显示第一行警告
-        } else if (data.newProducts > 0) {
-          toast.success(`扫描完成，发现 ${data.newProducts} 个新商品`);
-        } else {
-          toast.info('扫描完成，未发现新商品');
-        }
-        // 刷新日志
-        if (showLogs) {
-          setTimeout(loadLogs, 1000);
-        }
-      } else {
-        toast.error(data.error || '扫描失败');
-        if (data.hint) {
-          toast.info(data.hint, { duration: 10000 });
-        }
-      }
-    } catch (error) {
-      toast.error('触发扫描失败');
-    }
+  const openCreateForm = () => {
+    setEditingConfig(null);
+    resetForm();
+    setShowForm(true);
   };
 
-  // 编辑配置
   const handleEdit = (config: MonitorConfig) => {
     setEditingConfig(config);
     setFormData({
@@ -209,30 +165,112 @@ export default function Home() {
       webhook_url: config.webhook_url || '',
       cookies: config.cookies || '',
       is_active: config.is_active,
+      browser_headless: config.browser_headless ?? false,
+      browser_save_debug: config.browser_save_debug ?? true,
+      browser_channel: config.browser_channel || 'system',
+      browser_executable_path: config.browser_executable_path || '',
+      browser_user_data_dir: config.browser_user_data_dir || '',
     });
     setShowForm(true);
   };
 
-  // 重置表单
-  const resetForm = () => {
-    setFormData({
-      search_keyword: '摩托车',
-      price_min: '20000',
-      price_max: '',
-      time_range: '1hour',
-      sort_type: 'newest',
-      cron_expression: '0 */30 * * * *',
-      webhook_url: '',
-      cookies: '',
-      is_active: true,
-    });
+  const buildPayload = () => ({
+    search_keyword: formData.search_keyword,
+    price_min: formData.price_min ? parseInt(formData.price_min, 10) : null,
+    price_max: formData.price_max ? parseInt(formData.price_max, 10) : null,
+    time_range: formData.time_range || null,
+    sort_type: formData.sort_type || null,
+    cron_expression: formData.cron_expression,
+    webhook_url: formData.webhook_url || null,
+    cookies: formData.cookies || null,
+    is_active: formData.is_active,
+    browser_headless: formData.browser_headless,
+    browser_save_debug: formData.browser_save_debug,
+    browser_channel: formData.browser_channel === 'system' ? null : formData.browser_channel,
+    browser_executable_path: formData.browser_executable_path || null,
+    browser_user_data_dir: formData.browser_user_data_dir || null,
+  });
+
+  const handleSave = async () => {
+    try {
+      const url = editingConfig ? `/api/configs/${editingConfig.id}` : '/api/configs';
+      const method = editingConfig ? 'PUT' : 'POST';
+
+      const response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildPayload()),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        toast.error(error.message || error.error || '保存失败');
+        return;
+      }
+
+      toast.success(editingConfig ? '配置已更新' : '配置已创建');
+      setShowForm(false);
+      setEditingConfig(null);
+      resetForm();
+      loadConfigs();
+    } catch {
+      toast.error('保存失败');
+    }
+  };
+
+  const handleDelete = async (id: number) => {
+    if (!confirm('确定要删除这条监控配置吗？')) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/configs/${id}`, { method: 'DELETE' });
+      if (!response.ok) {
+        toast.error('删除失败');
+        return;
+      }
+      toast.success('配置已删除');
+      loadConfigs();
+    } catch {
+      toast.error('删除失败');
+    }
+  };
+
+  const handleTrigger = async (id: number) => {
+    try {
+      toast.info('开始扫描...');
+      const response = await fetch(`/api/trigger/${id}`, { method: 'POST' });
+      const data = await response.json();
+
+      if (!response.ok) {
+        toast.error(data.error || '扫描失败');
+        if (data.hint) {
+          toast.info(data.hint, { duration: 10000 });
+        }
+        return;
+      }
+
+      if (data.warning) {
+        toast.warning(data.warning.split('\n')[0]);
+      } else if (data.newProducts > 0) {
+        toast.success(`扫描完成，发现 ${data.newProducts} 个新商品`);
+      } else {
+        toast.info('扫描完成，未发现新商品');
+      }
+
+      if (showLogs) {
+        setTimeout(loadLogs, 1000);
+      }
+    } catch {
+      toast.error('触发扫描失败');
+    }
   };
 
   const getTimeRangeLabel = (range: string | null) => {
     const labels: Record<string, string> = {
-      '1hour': '1小时内',
-      '24hours': '24小时内',
-      '7days': '7天内',
+      '1hour': '1 小时内',
+      '24hours': '24 小时内',
+      '7days': '7 天内',
     };
     return labels[range || ''] || '不限';
   };
@@ -247,26 +285,33 @@ export default function Home() {
   };
 
   const getCronDescription = (cron: string) => {
-    if (cron.includes('*/30 * * * *')) return '每30分钟';
-    if (cron.includes('*/60 * * * *') || cron.includes('0 * * * *')) return '每小时';
-    if (cron.includes('0 */2 * * *')) return '每2小时';
-    if (cron.includes('0 */6 * * *')) return '每6小时';
+    if (cron === '0 */15 * * * *') return '每 15 分钟';
+    if (cron === '0 */30 * * * *') return '每 30 分钟';
+    if (cron === '0 * * * * *') return '每小时';
+    if (cron === '0 */2 * * * *') return '每 2 小时';
+    if (cron === '0 */6 * * * *') return '每 6 小时';
+    if (cron === '0 0 * * * *') return '每天整点';
     return cron;
   };
 
-  // 高亮日志中的关键词
+  const getBrowserModeLabel = (config: MonitorConfig) => {
+    const mode = config.browser_headless ? '无头' : '可视';
+    const channel = config.browser_channel || '系统默认';
+    return `${mode} / ${channel}`;
+  };
+
   const highlightLog = (log: string) => {
     if (log.includes('ERROR') || log.includes('error') || log.includes('失败')) {
-      return 'text-red-500';
+      return 'text-red-400';
     }
     if (log.includes('WARN') || log.includes('警告')) {
-      return 'text-yellow-500';
+      return 'text-yellow-400';
     }
-    if (log.includes('SUCCESS') || log.includes('成功') || log.includes('完成')) {
-      return 'text-green-500';
+    if (log.includes('成功') || log.includes('完成')) {
+      return 'text-green-400';
     }
-    if (log.includes('监控任务') || log.includes('扫描')) {
-      return 'text-blue-400';
+    if (log.includes('扫描') || log.includes('监控')) {
+      return 'text-blue-300';
     }
     return 'text-slate-300';
   };
@@ -280,94 +325,80 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-8">
-      <div className="max-w-6xl mx-auto">
-        {/* 头部 */}
-        <div className="flex items-center justify-between mb-8">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100 p-6 md:p-8">
+      <div className="mx-auto max-w-6xl">
+        <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
-            <h1 className="text-3xl font-bold text-slate-800">闲鱼商品监控</h1>
-            <p className="text-slate-600 mt-2">定时扫描闲鱼商品，发现新品即时通知</p>
+            <h1 className="text-3xl font-bold tracking-tight text-slate-900">闲鱼商品监控</h1>
+            <p className="mt-2 text-slate-600">定时扫描闲鱼搜索结果，发现新商品后记录并通知。</p>
           </div>
           <div className="flex gap-2">
-            <Button
-              variant="outline"
-              onClick={() => setShowLogs(true)}
-              className="gap-2"
-            >
-              <Terminal className="w-4 h-4" />
+            <Button variant="outline" onClick={() => setShowLogs(true)} className="gap-2">
+              <Terminal className="h-4 w-4" />
               查看日志
             </Button>
-            <Button
-              onClick={() => {
-                resetForm();
-                setEditingConfig(null);
-                setShowForm(true);
-              }}
-              className="gap-2"
-            >
-              <Plus className="w-4 h-4" />
+            <Button onClick={openCreateForm} className="gap-2">
+              <Plus className="h-4 w-4" />
               新建监控
             </Button>
           </div>
         </div>
 
-        {/* 架构说明卡片 */}
-        <Card className="mb-6 border-blue-200 bg-blue-50">
+        <Card className="mb-6 border-amber-200 bg-amber-50/80">
           <CardContent className="py-4">
             <div className="flex items-start gap-3">
-              <AlertCircle className="w-5 h-5 text-blue-600 mt-0.5" />
-              <div className="text-sm text-blue-800">
-                <p className="font-medium">架构说明</p>
+              <AlertCircle className="mt-0.5 h-5 w-5 text-amber-700" />
+              <div className="text-sm text-amber-900">
+                <p className="font-medium">浏览器行为说明</p>
                 <p className="mt-1">
-                  本项目采用 <strong>前后端分离</strong> 架构：Playwright 爬虫在<strong>服务端</strong>运行，
-                  通过 API 触发。点击"立即扫描"后，服务器会启动无头浏览器访问闲鱼并提取商品数据。
+                  现在每条监控都可以在配置页里单独设置浏览器模式。你可以切换无头/可视模式、选择
+                  `chrome` 或 `msedge`、指定本机浏览器路径，或复用本地用户目录来继承登录态。
                 </p>
               </div>
             </div>
           </CardContent>
         </Card>
 
-        {/* 配置列表 */}
         {configs.length === 0 ? (
-          <Card className="text-center py-12">
+          <Card className="py-12 text-center">
             <CardContent>
-              <Search className="w-16 h-16 mx-auto text-slate-300 mb-4" />
-              <h3 className="text-lg font-semibold text-slate-600 mb-2">还没有监控配置</h3>
-              <p className="text-slate-500 mb-4">点击右上角按钮创建第一个监控任务</p>
-              <Button onClick={() => setShowForm(true)}>
-                <Plus className="w-4 h-4 mr-2" />
+              <Search className="mx-auto mb-4 h-16 w-16 text-slate-300" />
+              <h3 className="mb-2 text-lg font-semibold text-slate-700">还没有监控配置</h3>
+              <p className="mb-4 text-slate-500">先创建一条配置，测试搜索结果和浏览器调试选项。</p>
+              <Button onClick={openCreateForm}>
+                <Plus className="mr-2 h-4 w-4" />
                 创建监控
               </Button>
             </CardContent>
           </Card>
         ) : (
           <div className="grid gap-4">
-            {configs.map((config) => (
+            {configs.map(config => (
               <Card key={config.id} className={!config.is_active ? 'opacity-60' : ''}>
                 <CardHeader>
-                  <div className="flex items-start justify-between">
+                  <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                     <div>
-                      <CardTitle className="text-xl flex items-center gap-2">
-                        <Search className="w-5 h-5" />
+                      <CardTitle className="flex items-center gap-2 text-xl">
+                        <Search className="h-5 w-5" />
                         {config.search_keyword}
                         <Badge variant={config.is_active ? 'default' : 'secondary'}>
                           {config.is_active ? '运行中' : '已暂停'}
                         </Badge>
                       </CardTitle>
-                      <CardDescription className="mt-2 flex flex-wrap gap-3">
+                      <CardDescription className="mt-3 flex flex-wrap gap-3 text-sm">
                         {config.price_min && (
                           <span className="flex items-center gap-1">
-                            <DollarSign className="w-4 h-4" />
-                            ¥{config.price_min}
-                            {config.price_max && ` - ¥${config.price_max}`}
+                            <DollarSign className="h-4 w-4" />
+                            {config.price_min}
+                            {config.price_max ? ` - ${config.price_max}` : ''} 元
                           </span>
                         )}
                         <span className="flex items-center gap-1">
-                          <Clock className="w-4 h-4" />
+                          <Clock className="h-4 w-4" />
                           {getTimeRangeLabel(config.time_range)}
                         </span>
                         <span className="flex items-center gap-1">
-                          <ArrowUpDown className="w-4 h-4" />
+                          <ArrowUpDown className="h-4 w-4" />
                           {getSortTypeLabel(config.sort_type)}
                         </span>
                       </CardDescription>
@@ -379,39 +410,39 @@ export default function Home() {
                         onClick={() => handleTrigger(config.id)}
                         disabled={!config.is_active}
                       >
-                        <Play className="w-4 h-4 mr-1" />
+                        <Play className="mr-1 h-4 w-4" />
                         立即扫描
                       </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleEdit(config)}
-                      >
-                        <Edit className="w-4 h-4" />
+                      <Button variant="outline" size="sm" onClick={() => handleEdit(config)}>
+                        <Edit className="h-4 w-4" />
                       </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleDelete(config.id)}
-                      >
-                        <Trash2 className="w-4 h-4" />
+                      <Button variant="outline" size="sm" onClick={() => handleDelete(config.id)}>
+                        <Trash2 className="h-4 w-4" />
                       </Button>
                     </div>
                   </div>
                 </CardHeader>
                 <CardContent>
-                  <div className="flex items-center justify-between text-sm text-slate-600">
-                    <div className="flex items-center gap-4">
+                  <div className="flex flex-col gap-3 text-sm text-slate-600 md:flex-row md:items-center md:justify-between">
+                    <div className="flex flex-wrap items-center gap-4">
                       <span className="flex items-center gap-1">
-                        <Bell className="w-4 h-4" />
+                        <Bell className="h-4 w-4" />
                         {config.webhook_url ? '已配置通知' : '未配置通知'}
                       </span>
                       <span className="flex items-center gap-1">
-                        <Cookie className="w-4 h-4" />
-                        {config.cookies ? '已设置Cookie' : '未设置Cookie'}
+                        <Cookie className="h-4 w-4" />
+                        {config.cookies ? '已配置 Cookie' : '未配置 Cookie'}
                       </span>
                       <span className="flex items-center gap-1">
-                        <Clock className="w-4 h-4" />
+                        <Eye className="h-4 w-4" />
+                        {getBrowserModeLabel(config)}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <Bug className="h-4 w-4" />
+                        {config.browser_save_debug ?? true ? '保存调试文件' : '不保存调试文件'}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <Clock className="h-4 w-4" />
                         {getCronDescription(config.cron_expression)}
                       </span>
                     </div>
@@ -423,38 +454,32 @@ export default function Home() {
           </div>
         )}
 
-        {/* 创建/编辑表单 */}
         {showForm && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-            <Card className="w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+            <Card className="max-h-[92vh] w-full max-w-3xl overflow-y-auto">
               <CardHeader>
                 <CardTitle>{editingConfig ? '编辑监控配置' : '新建监控配置'}</CardTitle>
-                <CardDescription>
-                  设置搜索条件和通知方式，系统将自动定时扫描
-                </CardDescription>
+                <CardDescription>搜索条件、Cookie、通知和浏览器行为都可以在这里集中配置。</CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
-                {/* 搜索关键词 */}
+              <CardContent className="space-y-6">
                 <div className="space-y-2">
-                  <Label htmlFor="keyword">搜索关键词 *</Label>
+                  <Label htmlFor="keyword">搜索关键词</Label>
                   <Input
                     id="keyword"
                     value={formData.search_keyword}
-                    onChange={(e) => setFormData({ ...formData, search_keyword: e.target.value })}
+                    onChange={e => updateForm('search_keyword', e.target.value)}
                     placeholder="例如：摩托车"
                   />
                 </div>
 
-                {/* 价格范围 */}
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="priceMin">最低价格（元）</Label>
                     <Input
                       id="priceMin"
                       type="number"
                       value={formData.price_min}
-                      onChange={(e) => setFormData({ ...formData, price_min: e.target.value })}
-                      placeholder="例如：20000"
+                      onChange={e => updateForm('price_min', e.target.value)}
                     />
                   </div>
                   <div className="space-y-2">
@@ -463,36 +488,28 @@ export default function Home() {
                       id="priceMax"
                       type="number"
                       value={formData.price_max}
-                      onChange={(e) => setFormData({ ...formData, price_max: e.target.value })}
-                      placeholder="可选"
+                      onChange={e => updateForm('price_max', e.target.value)}
                     />
                   </div>
                 </div>
 
-                {/* 时间范围和排序 */}
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
-                    <Label>时间范围</Label>
-                    <Select
-                      value={formData.time_range}
-                      onValueChange={(value) => setFormData({ ...formData, time_range: value })}
-                    >
+                    <Label>发布时间范围</Label>
+                    <Select value={formData.time_range} onValueChange={value => updateForm('time_range', value)}>
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="1hour">1小时内</SelectItem>
-                        <SelectItem value="24hours">24小时内</SelectItem>
-                        <SelectItem value="7days">7天内</SelectItem>
+                        <SelectItem value="1hour">1 小时内</SelectItem>
+                        <SelectItem value="24hours">24 小时内</SelectItem>
+                        <SelectItem value="7days">7 天内</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
                   <div className="space-y-2">
                     <Label>排序方式</Label>
-                    <Select
-                      value={formData.sort_type}
-                      onValueChange={(value) => setFormData({ ...formData, sort_type: value })}
-                    >
+                    <Select value={formData.sort_type} onValueChange={value => updateForm('sort_type', value)}>
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
@@ -505,85 +522,144 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* Cron 表达式 */}
                 <div className="space-y-2">
-                  <Label htmlFor="cron">扫描频率</Label>
+                  <Label>扫描频率</Label>
                   <Select
                     value={formData.cron_expression}
-                    onValueChange={(value) => setFormData({ ...formData, cron_expression: value })}
+                    onValueChange={value => updateForm('cron_expression', value)}
                   >
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="0 */15 * * * *">每15分钟</SelectItem>
-                      <SelectItem value="0 */30 * * * *">每30分钟</SelectItem>
+                      <SelectItem value="0 */15 * * * *">每 15 分钟</SelectItem>
+                      <SelectItem value="0 */30 * * * *">每 30 分钟</SelectItem>
                       <SelectItem value="0 * * * * *">每小时</SelectItem>
-                      <SelectItem value="0 */2 * * * *">每2小时</SelectItem>
-                      <SelectItem value="0 */6 * * * *">每6小时</SelectItem>
-                      <SelectItem value="0 0 * * * *">每天凌晨</SelectItem>
+                      <SelectItem value="0 */2 * * * *">每 2 小时</SelectItem>
+                      <SelectItem value="0 */6 * * * *">每 6 小时</SelectItem>
+                      <SelectItem value="0 0 * * * *">每天整点</SelectItem>
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-slate-500">
-                    当前: {getCronDescription(formData.cron_expression)}
-                  </p>
+                  <p className="text-xs text-slate-500">当前：{getCronDescription(formData.cron_expression)}</p>
                 </div>
 
-                {/* Cookie 设置 */}
                 <div className="space-y-2">
                   <Label htmlFor="cookies" className="flex items-center gap-2">
-                    <Cookie className="w-4 h-4" />
-                    闲鱼登录 Cookie
+                    <Cookie className="h-4 w-4" />
+                    闲鱼 Cookie
                   </Label>
                   <Textarea
                     id="cookies"
                     value={formData.cookies}
-                    onChange={(e) => setFormData({ ...formData, cookies: e.target.value })}
-                    placeholder="请粘贴从浏览器复制的 Cookie 字符串"
-                    rows={3}
+                    onChange={e => updateForm('cookies', e.target.value)}
+                    rows={4}
                     className="font-mono text-xs"
+                    placeholder="粘贴从浏览器复制的 Cookie 字符串或 JSON 导出内容"
                   />
-                  <div className="flex items-start gap-2 p-3 bg-amber-50 rounded-lg border border-amber-200">
-                    <AlertCircle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
-                    <div className="text-xs text-amber-800">
-                      <p className="font-medium mb-1">如何获取 Cookie：</p>
-                      <ol className="list-decimal list-inside space-y-1">
-                        <li>在浏览器中登录闲鱼网页版 (goofish.com)</li>
-                        <li>按 F12 打开开发者工具</li>
-                        <li>切换到 Network 标签页</li>
-                        <li>刷新页面，找到任意请求</li>
-                        <li>在请求头中找到 Cookie 字段并复制</li>
-                      </ol>
-                    </div>
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                    建议先在本地浏览器中确认已登录 goofish.com，再复制 Cookie。
+                    如果你准备复用本机用户目录，也可以只填少量 Cookie 作为补充。
                   </div>
                 </div>
 
-                {/* Webhook URL */}
                 <div className="space-y-2">
                   <Label htmlFor="webhook">Webhook 通知地址</Label>
                   <Input
                     id="webhook"
                     value={formData.webhook_url}
-                    onChange={(e) => setFormData({ ...formData, webhook_url: e.target.value })}
-                    placeholder="例如：https://api.example.com/webhook"
+                    onChange={e => updateForm('webhook_url', e.target.value)}
+                    placeholder="https://example.com/webhook"
                   />
-                  <p className="text-xs text-slate-500">
-                    支持飞书、钉钉、企业微信等机器人 Webhook
-                  </p>
                 </div>
 
-                {/* 启用状态 */}
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="active">启用监控</Label>
+                <Card className="border-slate-200 bg-slate-50/80">
+                  <CardHeader>
+                    <CardTitle className="text-base">浏览器调试配置</CardTitle>
+                    <CardDescription>
+                      这些选项会覆盖默认 `.env` 配置，按当前监控单独生效。
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label>浏览器通道</Label>
+                        <Select
+                          value={formData.browser_channel}
+                          onValueChange={value => updateForm('browser_channel', value)}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="system">系统默认</SelectItem>
+                            <SelectItem value="chrome">Chrome</SelectItem>
+                            <SelectItem value="msedge">Edge</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="browserExec">浏览器可执行文件</Label>
+                        <Input
+                          id="browserExec"
+                          value={formData.browser_executable_path}
+                          onChange={e => updateForm('browser_executable_path', e.target.value)}
+                          placeholder="可选，例如 C:\Program Files\Google\Chrome\Application\chrome.exe"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="userDataDir">用户目录</Label>
+                      <Input
+                        id="userDataDir"
+                        value={formData.browser_user_data_dir}
+                        onChange={e => updateForm('browser_user_data_dir', e.target.value)}
+                        placeholder="可选，例如 C:\Users\你的用户名\AppData\Local\Microsoft\Edge\User Data"
+                      />
+                      <p className="text-xs text-slate-500">
+                        用于尝试复用本地登录态。最好先关闭对应浏览器，再用这个目录启动。
+                      </p>
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="flex items-center justify-between rounded-lg border bg-white p-3">
+                        <div>
+                          <p className="font-medium text-slate-900">无头模式</p>
+                          <p className="text-xs text-slate-500">关闭后会弹出真实浏览器窗口，便于观察搜索过程。</p>
+                        </div>
+                        <Switch
+                          checked={formData.browser_headless}
+                          onCheckedChange={checked => updateForm('browser_headless', checked)}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between rounded-lg border bg-white p-3">
+                        <div>
+                          <p className="font-medium text-slate-900">保存调试文件</p>
+                          <p className="text-xs text-slate-500">
+                            在 `.next/debug/xianyu/` 里保存截图和 HTML。
+                          </p>
+                        </div>
+                        <Switch
+                          checked={formData.browser_save_debug}
+                          onCheckedChange={checked => updateForm('browser_save_debug', checked)}
+                        />
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <div className="flex items-center justify-between rounded-lg border p-3">
+                  <div>
+                    <p className="font-medium text-slate-900">启用监控</p>
+                    <p className="text-xs text-slate-500">关闭后配置保留，但不会自动扫描。</p>
+                  </div>
                   <Switch
-                    id="active"
                     checked={formData.is_active}
-                    onCheckedChange={(checked) => setFormData({ ...formData, is_active: checked })}
+                    onCheckedChange={checked => updateForm('is_active', checked)}
                   />
                 </div>
 
-                {/* 操作按钮 */}
-                <div className="flex gap-2 pt-4">
+                <div className="flex gap-2 pt-2">
                   <Button
                     variant="outline"
                     className="flex-1"
@@ -595,7 +671,7 @@ export default function Home() {
                     取消
                   </Button>
                   <Button className="flex-1" onClick={handleSave}>
-                    {editingConfig ? '更新' : '创建'}
+                    {editingConfig ? '更新配置' : '创建配置'}
                   </Button>
                 </div>
               </CardContent>
@@ -603,20 +679,17 @@ export default function Home() {
           </div>
         )}
 
-        {/* 日志查看面板 */}
         {showLogs && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-            <Card className="w-full max-w-5xl max-h-[90vh] flex flex-col">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+            <Card className="flex max-h-[90vh] w-full max-w-5xl flex-col">
               <CardHeader className="flex-shrink-0">
                 <div className="flex items-center justify-between">
                   <div>
                     <CardTitle className="flex items-center gap-2">
-                      <Terminal className="w-5 h-5" />
+                      <Terminal className="h-5 w-5" />
                       后台日志
                     </CardTitle>
-                    <CardDescription>
-                      查看系统运行日志，了解扫描状态
-                    </CardDescription>
+                    <CardDescription>用来检查浏览器启动方式、登录态、截图保存路径和提取结果。</CardDescription>
                   </div>
                   <div className="flex items-center gap-2">
                     <Button
@@ -625,40 +698,26 @@ export default function Home() {
                       onClick={() => setAutoRefresh(!autoRefresh)}
                       className={autoRefresh ? 'bg-green-100 text-green-700' : ''}
                     >
-                      <RefreshCw className={`w-4 h-4 mr-1 ${autoRefresh ? 'animate-spin' : ''}`} />
+                      <RefreshCw className={`mr-1 h-4 w-4 ${autoRefresh ? 'animate-spin' : ''}`} />
                       {autoRefresh ? '自动刷新中' : '自动刷新'}
                     </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={loadLogs}
-                      disabled={logsLoading}
-                    >
-                      <RefreshCw className={`w-4 h-4 mr-1 ${logsLoading ? 'animate-spin' : ''}`} />
+                    <Button variant="outline" size="sm" onClick={loadLogs} disabled={logsLoading}>
+                      <RefreshCw className={`mr-1 h-4 w-4 ${logsLoading ? 'animate-spin' : ''}`} />
                       刷新
                     </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setShowLogs(false)}
-                    >
-                      <X className="w-4 h-4" />
+                    <Button variant="ghost" size="sm" onClick={() => setShowLogs(false)}>
+                      <X className="h-4 w-4" />
                     </Button>
                   </div>
                 </div>
               </CardHeader>
               <CardContent className="flex-1 overflow-hidden">
-                <div className="h-[60vh] bg-slate-900 rounded-lg p-4 overflow-y-auto font-mono text-xs">
+                <div className="h-[60vh] overflow-y-auto rounded-lg bg-slate-950 p-4 font-mono text-xs">
                   {logs.length === 0 ? (
-                    <div className="text-slate-400 text-center py-8">
-                      暂无日志
-                    </div>
+                    <div className="py-8 text-center text-slate-400">暂无日志</div>
                   ) : (
                     logs.map((log, index) => (
-                      <div 
-                        key={index} 
-                        className={`py-0.5 ${highlightLog(log)}`}
-                      >
+                      <div key={index} className={`py-0.5 ${highlightLog(log)}`}>
                         {log}
                       </div>
                     ))

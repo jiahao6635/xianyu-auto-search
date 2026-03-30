@@ -14,6 +14,11 @@ interface MonitorConfig {
   webhook_url: string | null;
   cookies: string | null;
   is_active: boolean;
+  browser_headless: boolean | null;
+  browser_save_debug: boolean | null;
+  browser_channel: string | null;
+  browser_executable_path: string | null;
+  browser_user_data_dir: string | null;
 }
 
 const scheduledTasks = new Map<number, ScheduledTask>();
@@ -81,7 +86,16 @@ export async function executeMonitor(config: MonitorConfig): Promise<Product[]> 
       console.warn(`配置 #${config.id} 未设置 Cookie，可能无法正常获取数据`);
     }
 
-    const scraper = await createScraper(config.cookies || undefined);
+    const scraper = await createScraper(config.cookies || undefined, {
+      headless: config.browser_headless ?? undefined,
+      saveDebugArtifacts: config.browser_save_debug ?? undefined,
+      channel:
+        config.browser_channel === 'chrome' || config.browser_channel === 'msedge'
+          ? config.browser_channel
+          : undefined,
+      executablePath: config.browser_executable_path || undefined,
+      userDataDir: config.browser_user_data_dir || undefined,
+    });
     
     try {
       // 执行搜索
@@ -92,6 +106,16 @@ export async function executeMonitor(config: MonitorConfig): Promise<Product[]> 
         timeRange: config.time_range || undefined,
         sortType: config.sort_type || undefined,
         cookies: config.cookies || undefined,
+        browserOptions: {
+          headless: config.browser_headless ?? undefined,
+          saveDebugArtifacts: config.browser_save_debug ?? undefined,
+          channel:
+            config.browser_channel === 'chrome' || config.browser_channel === 'msedge'
+              ? config.browser_channel
+              : undefined,
+          executablePath: config.browser_executable_path || undefined,
+          userDataDir: config.browser_user_data_dir || undefined,
+        },
       });
 
       console.log(`找到 ${products.length} 个商品`);

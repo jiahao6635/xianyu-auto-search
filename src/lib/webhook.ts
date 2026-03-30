@@ -16,6 +16,7 @@ interface GenericWebhookPayload {
     price: number;
     priceYuan: string;
     url: string;
+    mobileUrl: string;
     imageUrl: string;
     publishTime: string | null;
     location: string | null;
@@ -30,6 +31,12 @@ interface FeishuWebhookResponse {
 }
 
 const FEISHU_BATCH_SIZE = 6;
+/** 飞书对 webhook 发卡片有频率限制，批次之间留出间隔可降低 11232 frequency limited */
+const FEISHU_INTER_BATCH_DELAY_MS = 1200;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 function isFeishuWebhook(webhookUrl: string): boolean {
   return webhookUrl.includes('open.feishu.cn/open-apis/bot/');
@@ -55,6 +62,10 @@ function formatLocation(product: Product): string {
   return product.location || '未知';
 }
 
+function buildMobileUrl(product: Product): string {
+  return `https://h5.m.goofish.com/item?id=${encodeURIComponent(product.id)}`;
+}
+
 function buildGenericPayload(products: Product[], config: MonitorConfig): GenericWebhookPayload {
   return {
     configId: config.id,
@@ -67,6 +78,7 @@ function buildGenericPayload(products: Product[], config: MonitorConfig): Generi
       price: product.price,
       priceYuan: (product.price / 100).toFixed(2),
       url: product.url,
+      mobileUrl: buildMobileUrl(product),
       imageUrl: product.imageUrl,
       publishTime: product.publishTime || null,
       location: product.location || null,
@@ -83,6 +95,7 @@ function buildFeishuCardPayload(
   const productBlocks = products.flatMap((product, index) => {
     const displayTitle = escapeLarkMd(product.title.slice(0, 60));
     const prefix = batchIndex * FEISHU_BATCH_SIZE + index + 1;
+    const mobileUrl = buildMobileUrl(product);
 
     return [
       {
@@ -94,8 +107,17 @@ function buildFeishuCardPayload(
             `价格：${formatPrice(product.price)}\n` +
             `上架时间：${escapeLarkMd(formatPublishTime(product))}\n` +
             `卖家地区：${escapeLarkMd(formatLocation(product))}\n` +
-            `[打开闲鱼商品](${product.url})`,
+            `[手机打开](${mobileUrl}) | [网页打开](${product.url})`,
         },
+      },
+      {
+        tag: 'note',
+        elements: [
+          {
+            tag: 'plain_text',
+            content: '手机打开优先使用闲鱼移动详情页，若手机已安装闲鱼，通常会自动拉起 App。',
+          },
+        ],
       },
       {
         tag: 'hr',
@@ -152,6 +174,16 @@ function buildFeishuCardPayload(
                 tag: 'lark_md',
                 content: `**发送时间**\n${new Date().toLocaleString('zh-CN')}`,
               },
+            },
+          ],
+        },
+        {
+          tag: 'note',
+          elements: [
+            {
+              tag: 'plain_text',
+              content:
+                '说明：m.tb.cn 短链和闲鱼小程序口令属于客户端分享结果，无法仅凭商品 ID 稳定生成；当前采用手机可直接访问的闲鱼移动详情页链接。',
             },
           ],
         },
@@ -235,10 +267,35 @@ async function sendFeishuBatches(webhookUrl: string, products: Product[], config
     );
 
     const payload = buildFeishuCardPayload(batch, config, index, batches.length);
-    await postWebhook(webhookUrl, payload, {
-      label: `feishu card batch ${index + 1}/${batches.length}`,
-      checkFeishuBusinessCode: true,
-    });
+    const label = `feishu card batch ${index + 1}/${batches.length}`;
+    const maxAttempts = 4;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await postWebhook(webhookUrl, payload, {
+          label,
+          checkFeishuBusinessCode: true,
+        });
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const isFreqLimited =
+          message.includes('11232') ||
+          message.includes('frequency limited') ||
+          message.includes('Frequency limit');
+        if (!isFreqLimited || attempt === maxAttempts) {
+          throw error;
+        }
+        const waitMs = 1500 * attempt;
+        console.warn(
+          `[webhook] 飞书频率限制，${waitMs}ms 后重试第 ${attempt + 1}/${maxAttempts} 次：${label}`,
+        );
+        await sleep(waitMs);
+      }
+    }
+
+    if (index < batches.length - 1) {
+      await sleep(FEISHU_INTER_BATCH_DELAY_MS);
+    }
   }
 }
 

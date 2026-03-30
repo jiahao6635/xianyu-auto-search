@@ -285,6 +285,8 @@ export default function Home() {
   };
 
   const getCronDescription = (cron: string) => {
+    if (cron === '0 */5 * * * *') return '每 5 分钟';
+    if (cron === '0 */10 * * * *') return '每 10 分钟';
     if (cron === '0 */15 * * * *') return '每 15 分钟';
     if (cron === '0 */30 * * * *') return '每 30 分钟';
     if (cron === '0 * * * * *') return '每小时';
@@ -532,6 +534,8 @@ export default function Home() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value="0 */5 * * * *">每 5 分钟</SelectItem>
+                      <SelectItem value="0 */10 * * * *">每 10 分钟</SelectItem>
                       <SelectItem value="0 */15 * * * *">每 15 分钟</SelectItem>
                       <SelectItem value="0 */30 * * * *">每 30 分钟</SelectItem>
                       <SelectItem value="0 * * * * *">每小时</SelectItem>

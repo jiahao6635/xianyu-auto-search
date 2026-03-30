@@ -1,6 +1,12 @@
 import cron, { ScheduledTask } from 'node-cron';
 import { getSupabaseClient } from '@/storage/database/supabase-client';
-import { createScraper, isProductSent, recordSentProduct, Product } from './xianyu-scraper';
+import {
+  createScraper,
+  isProductSent,
+  Product,
+  recordFetchedProducts,
+  recordSentProduct,
+} from './xianyu-scraper';
 import { sendWebhookNotification } from './webhook';
 
 interface MonitorConfig {
@@ -23,7 +29,17 @@ interface MonitorConfig {
 
 const scheduledTasks = new Map<number, ScheduledTask>();
 
-// 启动所有活跃的监控任务
+function buildBatchId(prefix: 'manual' | 'scheduler', configId: number): string {
+  return `${prefix}-${configId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function resolveBrowserChannel(channel: string | null): 'chrome' | 'msedge' | undefined {
+  if (channel === 'chrome' || channel === 'msedge') {
+    return channel;
+  }
+  return undefined;
+}
+
 export async function startAllMonitors() {
   const client = getSupabaseClient();
   const { data: configs, error } = await client
@@ -36,7 +52,9 @@ export async function startAllMonitors() {
     return;
   }
 
-  if (!configs) return;
+  if (!configs) {
+    return;
+  }
 
   for (const config of configs) {
     startMonitor(config as MonitorConfig);
@@ -45,60 +63,57 @@ export async function startAllMonitors() {
   console.log(`已启动 ${configs.length} 个监控任务`);
 }
 
-// 启动单个监控任务
 export function startMonitor(config: MonitorConfig) {
-  // 如果任务已存在，先停止
   stopMonitor(config.id);
 
-  // 验证 cron 表达式
   if (!cron.validate(config.cron_expression)) {
     console.error(`无效的 cron 表达式: ${config.cron_expression}`);
     return;
   }
 
-  // 创建定时任务
-  const task = cron.schedule(config.cron_expression, async () => {
-    console.log(`[${new Date().toISOString()}] 执行监控任务 #${config.id}: ${config.search_keyword}`);
-    await executeMonitor(config);
-  }, {
-    timezone: 'Asia/Shanghai',
-  });
+  const task = cron.schedule(
+    config.cron_expression,
+    async () => {
+      console.log(`[${new Date().toISOString()}] 执行监控任务 #${config.id}: ${config.search_keyword}`);
+      await executeMonitor(config);
+    },
+    {
+      timezone: 'Asia/Shanghai',
+    },
+  );
 
   scheduledTasks.set(config.id, task);
   console.log(`监控任务 #${config.id} 已启动 (${config.cron_expression})`);
 }
 
-// 停止监控任务
 export function stopMonitor(configId: number) {
   const task = scheduledTasks.get(configId);
-  if (task) {
-    task.stop();
-    scheduledTasks.delete(configId);
-    console.log(`监控任务 #${configId} 已停止`);
+  if (!task) {
+    return;
   }
+
+  task.stop();
+  scheduledTasks.delete(configId);
+  console.log(`监控任务 #${configId} 已停止`);
 }
 
-// 执行监控任务
 export async function executeMonitor(config: MonitorConfig): Promise<Product[]> {
   try {
-    // 检查是否配置了 Cookie
     if (!config.cookies) {
-      console.warn(`配置 #${config.id} 未设置 Cookie，可能无法正常获取数据`);
+      console.warn(`配置 #${config.id} 未设置 Cookie，可能无法正常抓取数据`);
     }
 
-    const scraper = await createScraper(config.cookies || undefined, {
+    const browserOptions = {
       headless: config.browser_headless ?? undefined,
       saveDebugArtifacts: config.browser_save_debug ?? undefined,
-      channel:
-        config.browser_channel === 'chrome' || config.browser_channel === 'msedge'
-          ? config.browser_channel
-          : undefined,
+      channel: resolveBrowserChannel(config.browser_channel),
       executablePath: config.browser_executable_path || undefined,
       userDataDir: config.browser_user_data_dir || undefined,
-    });
-    
+    };
+
+    const scraper = await createScraper(config.cookies || undefined, browserOptions);
+
     try {
-      // 执行搜索
       const products = await scraper.search({
         keyword: config.search_keyword,
         priceMin: config.price_min || undefined,
@@ -106,21 +121,15 @@ export async function executeMonitor(config: MonitorConfig): Promise<Product[]> 
         timeRange: config.time_range || undefined,
         sortType: config.sort_type || undefined,
         cookies: config.cookies || undefined,
-        browserOptions: {
-          headless: config.browser_headless ?? undefined,
-          saveDebugArtifacts: config.browser_save_debug ?? undefined,
-          channel:
-            config.browser_channel === 'chrome' || config.browser_channel === 'msedge'
-              ? config.browser_channel
-              : undefined,
-          executablePath: config.browser_executable_path || undefined,
-          userDataDir: config.browser_user_data_dir || undefined,
-        },
+        browserOptions,
       });
 
       console.log(`找到 ${products.length} 个商品`);
 
-      // 过滤已发送的商品
+      const batchId = buildBatchId('scheduler', config.id);
+      await recordFetchedProducts(batchId, config.id, 'scheduler', products);
+      console.log(`[scheduler] 已写入 fetched_products: batchId=${batchId}, count=${products.length}`);
+
       const newProducts: Product[] = [];
       for (const product of products) {
         const sent = await isProductSent(product.id, config.id);
@@ -131,11 +140,9 @@ export async function executeMonitor(config: MonitorConfig): Promise<Product[]> 
 
       console.log(`发现 ${newProducts.length} 个新商品`);
 
-      // 发送通知并记录
       if (newProducts.length > 0 && config.webhook_url) {
         await sendWebhookNotification(config.webhook_url, newProducts, config);
 
-        // 记录已发送的商品
         for (const product of newProducts) {
           await recordSentProduct(product.id, config.id, product);
         }
@@ -151,7 +158,6 @@ export async function executeMonitor(config: MonitorConfig): Promise<Product[]> 
   }
 }
 
-// 手动触发监控
 export async function triggerMonitor(configId: number): Promise<Product[]> {
   const client = getSupabaseClient();
   const { data: config, error } = await client
@@ -167,7 +173,6 @@ export async function triggerMonitor(configId: number): Promise<Product[]> {
   return executeMonitor(config as MonitorConfig);
 }
 
-// 停止所有监控任务
 export function stopAllMonitors() {
   for (const [configId, task] of scheduledTasks) {
     task.stop();

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseClient } from '@/storage/database/supabase-client';
-import { createScraper, isProductSent, recordSentProduct } from '@/lib/xianyu-scraper';
+import { createScraper, isProductSent, recordFetchedProducts, recordSentProduct } from '@/lib/xianyu-scraper';
 import { sendWebhookNotification } from '@/lib/webhook';
 
 function summarizeProducts(
@@ -13,6 +13,10 @@ function summarizeProducts(
     .join(' | ');
 
   return summary || '<none>';
+}
+
+function buildBatchId(prefix: 'manual' | 'scheduler', configId: number): string {
+  return `${prefix}-${configId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export async function POST(
@@ -71,6 +75,9 @@ export async function POST(
 
       console.log(`[trigger] 抓取完成: total=${products.length}`);
       console.log(`[trigger] 抓取结果摘要: ${summarizeProducts(products, 5)}`);
+      const batchId = buildBatchId('manual', config.id);
+      await recordFetchedProducts(batchId, config.id, 'manual', products);
+      console.log(`[trigger] 已写入 fetched_products: batchId=${batchId}, count=${products.length}`);
 
       if (products.length === 0) {
         return NextResponse.json({

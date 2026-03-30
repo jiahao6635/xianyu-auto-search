@@ -47,3 +47,27 @@ export const sentProducts = pgTable(
     index('sent_products_sent_at_idx').on(table.sentAt),
   ],
 );
+
+export const fetchedProducts = pgTable(
+  'fetched_products',
+  {
+    id: serial().notNull().primaryKey(),
+    batchId: varchar('batch_id', { length: 64 }).notNull(),
+    configId: integer('config_id').notNull(),
+    triggerSource: varchar('trigger_source', { length: 20 }).notNull(),
+    productId: varchar('product_id', { length: 255 }).notNull(),
+    title: text('title'),
+    price: integer('price'),
+    url: text('url'),
+    imageUrl: text('image_url'),
+    publishTime: text('publish_time'),
+    location: text('location'),
+    fetchedAt: timestamp('fetched_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  table => [
+    index('fetched_products_batch_id_idx').on(table.batchId),
+    index('fetched_products_config_id_idx').on(table.configId),
+    index('fetched_products_product_id_idx').on(table.productId),
+    index('fetched_products_fetched_at_idx').on(table.fetchedAt),
+  ],
+);

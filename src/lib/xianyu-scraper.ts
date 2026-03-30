@@ -598,6 +598,33 @@ export async function recordSentProduct(
   });
 }
 
+export async function recordFetchedProducts(
+  batchId: string,
+  configId: number,
+  triggerSource: 'manual' | 'scheduler',
+  products: Product[],
+): Promise<void> {
+  if (products.length === 0) {
+    return;
+  }
+
+  const client = getSupabaseClient();
+  await client.from('fetched_products').insert(
+    products.map(product => ({
+      batch_id: batchId,
+      config_id: configId,
+      trigger_source: triggerSource,
+      product_id: product.id,
+      title: product.title,
+      price: product.price,
+      url: product.url,
+      image_url: product.imageUrl,
+      publish_time: product.publishTime || null,
+      location: product.location || null,
+    })),
+  );
+}
+
 export async function createScraper(
   cookies?: string,
   browserOptions?: Partial<BrowserRuntimeOptions>,

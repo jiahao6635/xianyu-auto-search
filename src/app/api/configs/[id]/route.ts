@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseClient } from '@/storage/database/supabase-client';
+import { startMonitor, stopMonitor } from '@/lib/monitor-scheduler';
 
 export async function PUT(
   request: NextRequest,
@@ -40,6 +41,12 @@ export async function PUT(
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
+    if (data?.is_active) {
+      startMonitor(data);
+    } else {
+      stopMonitor(parseInt(id, 10));
+    }
+
     return NextResponse.json({ config: data });
   } catch (error) {
     return NextResponse.json(
@@ -56,15 +63,18 @@ export async function DELETE(
   try {
     const { id } = await params;
     const client = getSupabaseClient();
+    const configId = parseInt(id, 10);
 
     const { error } = await client
       .from('monitor_configs')
       .delete()
-      .eq('id', parseInt(id));
+      .eq('id', configId);
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
+
+    stopMonitor(configId);
 
     return NextResponse.json({ success: true });
   } catch (error) {

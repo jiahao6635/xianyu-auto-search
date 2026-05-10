@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseClient } from '@/storage/database/supabase-client';
+import { startMonitor, stopMonitor } from '@/lib/monitor-scheduler';
 
 export async function GET() {
   try {
@@ -53,6 +54,12 @@ export async function POST(request: NextRequest) {
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    if (data?.is_active) {
+      startMonitor(data);
+    } else if (data?.id) {
+      stopMonitor(data.id);
     }
 
     return NextResponse.json({ config: data });

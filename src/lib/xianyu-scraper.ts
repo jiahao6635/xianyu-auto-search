@@ -1,11 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { BrowserContext, Cookie, ElementHandle, Locator, Page } from 'playwright';
-import {
-  acquireBrowserLease,
-  BrowserRuntimeOptions,
-  minimizePageWindow,
-} from '@/lib/browser-manager';
+import { BrowserContext, Cookie, ElementHandle, Page } from 'playwright';
+import { acquireBrowserLease, BrowserRuntimeOptions } from '@/lib/browser-manager';
 import { getSupabaseClient } from '@/storage/database/supabase-client';
 
 export interface Product {
@@ -86,22 +82,14 @@ export class XianyuScraper {
 
     const page = await this.context!.newPage();
 
-    if (!this.runtimeOptions.headless && this.runtimeOptions.startMinimized) {
-      await minimizePageWindow(page);
-    }
-
     try {
-      console.log('[scraper] 访问闲鱼首页...');
-      await page.goto('https://www.goofish.com/', {
+      const searchUrl = this.buildSearchUrl(config);
+      console.log(`[scraper] 直接访问搜索页: ${searchUrl}`);
+
+      await page.goto(searchUrl, {
         waitUntil: 'domcontentloaded',
         timeout: 30000,
       });
-      await page.waitForTimeout(2000);
-
-      const searchUrl = this.buildSearchUrl(config);
-      console.log(`[scraper] 搜索 URL: ${searchUrl}`);
-
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForTimeout(3000);
       await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => undefined);
 
@@ -112,7 +100,7 @@ export class XianyuScraper {
 
       const loginButtonVisible = await page.getByText('登录').first().isVisible().catch(() => false);
       if (loginButtonVisible) {
-        console.warn('[scraper] 检测到登录按钮，Cookie 可能已过期或当前上下文没有继承登录态');
+        console.warn('[scraper] 检测到登录按钮，Cookie 可能已过期，或当前浏览器上下文没有继承登录态');
       }
 
       await this.saveDebugArtifacts(page, 'search');
@@ -259,12 +247,7 @@ export class XianyuScraper {
       .waitForSelector('.search-container--eigqxPi6', { timeout: 15000 })
       .catch(() => undefined);
 
-    await this.applyRegionFilter(
-      page,
-      config.regionProvince,
-      config.regionCity,
-      config.regionDistrict,
-    );
+    await this.applyRegionFilter(page, config.regionProvince, config.regionCity, config.regionDistrict);
 
     if (config.sortType === 'newest') {
       await this.selectDropdownOption(page, '新发布', this.mapTimeRangeLabel(config.timeRange));
@@ -295,24 +278,56 @@ export class XianyuScraper {
       return;
     }
 
-    console.log(
-      `[scraper] 准备应用区域筛选: province=${province || '-'}, city=${city || '-'}, district=${district || '-'}`,
-    );
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      console.log(
+        `[scraper] 准备应用区域筛选 (${attempt}/${maxAttempts}): province=${province || '-'}, city=${city || '-'}, district=${district || '-'}`,
+      );
 
+      const ok = await this.applyRegionFilterAttempt(page, attempt, province, city, district);
+      if (ok) {
+        console.log('[scraper] 已确认区域筛选');
+        await page.waitForTimeout(1200);
+        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => undefined);
+        return;
+      }
+
+      if (attempt < maxAttempts) {
+        console.warn(`[scraper] 区域筛选未成功，准备第 ${attempt + 1} 次重试（先关闭弹层）`);
+        await page.keyboard.press('Escape').catch(() => undefined);
+        await page.waitForTimeout(500 + attempt * 400);
+      }
+    }
+
+    console.warn('[scraper] 区域筛选在多次尝试后仍失败');
+    await page.keyboard.press('Escape').catch(() => undefined);
+    await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => undefined);
+  }
+
+  /** 单次打开弹层、选省市区县、点「查看…宝贝」；失败时由上层重试 */
+  private async applyRegionFilterAttempt(
+    page: Page,
+    attemptNo: number,
+    province?: string,
+    city?: string,
+    district?: string,
+  ): Promise<boolean> {
     const openers = [
-      page.locator('text=地区').first(),
-      page.locator('text=选地区').first(),
-      page.locator('[class*="location"]').filter({ hasText: /地区|选地区|位置/ }).first(),
+      page.locator('.areaTextContainer--IQ5moIFF').first(),
+      page.locator('span.areaText--mQJFfu1p').filter({ hasText: '区域' }).first(),
+      page.locator('text=区域').first(),
     ];
 
     let opened = false;
+    const useForceOpener = attemptNo >= 2;
     for (const opener of openers) {
       if ((await opener.count()) === 0) {
         continue;
       }
 
       try {
-        await opener.click({ timeout: 3000 });
+        await opener.scrollIntoViewIfNeeded().catch(() => undefined);
+        await opener.click({ timeout: 5000, force: useForceOpener });
         opened = true;
         break;
       } catch {
@@ -322,91 +337,241 @@ export class XianyuScraper {
 
     if (!opened) {
       console.warn('[scraper] 未找到区域筛选入口');
-      return;
+      return false;
     }
 
-    await page.waitForTimeout(500);
+    await page.getByText('选地区').waitFor({ state: 'visible', timeout: 8000 }).catch(() => undefined);
+    await page
+      .locator('[class*="areaWrap"]')
+      .first()
+      .waitFor({ state: 'visible', timeout: 10000 })
+      .catch(() => undefined);
 
-    const modal = page
-      .locator('body')
-      .locator(':scope')
-      .filter({ hasText: /选地区|搜附近|常用地址/ })
-      .last();
+    const districtTrimmed = district?.trim();
 
-    if (!(await modal.count())) {
-      console.warn('[scraper] 区域筛选弹层未出现');
-      return;
-    }
-
-    if (province) {
-      const matched = await this.clickRegionOption(page, province);
-      if (!matched) {
-        console.warn(`[scraper] 未找到省份选项: ${province}`);
-      }
-      await page.waitForTimeout(400);
+    if (province && !(await this.clickRegionOption(page, province, '省份'))) {
+      return false;
     }
 
     if (city) {
-      const matched = await this.clickRegionOption(page, city);
-      if (!matched) {
-        console.warn(`[scraper] 未找到城市选项: ${city}`);
+      if (!(await this.clickRegionOption(page, city, '城市'))) {
+        return false;
       }
-      await page.waitForTimeout(400);
-    }
-
-    if (district) {
-      const matched = await this.clickRegionOption(page, district);
-      if (!matched) {
-        console.warn(`[scraper] 未找到区县选项: ${district}`);
+      if (!districtTrimmed && !(await this.clickRegionOption(page, `全${city}`, '区县(全市)'))) {
+        return false;
       }
-      await page.waitForTimeout(400);
     }
 
-    const confirmButton = page
-      .locator('button')
-      .filter({ hasText: /查看.*件宝贝|确定|完成/ })
-      .first();
-
-    if ((await confirmButton.count()) > 0) {
-      await confirmButton.click().catch(() => undefined);
-    } else {
-      await page.keyboard.press('Escape').catch(() => undefined);
+    if (districtTrimmed && !(await this.clickRegionOption(page, districtTrimmed, '区县'))) {
+      return false;
     }
 
-    console.log('[scraper] 已尝试应用区域筛选');
-    await page.waitForTimeout(1500);
-    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => undefined);
+    return this.clickRegionConfirmButton(page);
   }
 
-  private async clickRegionOption(page: Page, label: string): Promise<boolean> {
-    const exactCandidates = [
-      page.locator('div,span,li').filter({ hasText: new RegExp(`^${this.escapeRegExp(label)}$`) }),
-      page.locator('text=' + label),
-    ];
+  /**
+   * 地区弹层底部「查看999+件宝贝」：
+   * - 文案含「+」；可点击层常在父级，仅用 Playwright 点子节点会「成功」但不关弹层。
+   * - 不能用含「确定|完成」的无作用域 role 匹配，易误点页面其它按钮却返回成功。
+   */
+  private async clickRegionConfirmButton(page: Page): Promise<boolean> {
+    const viewGoods = /查看\d+\+?\s*件宝贝|查看\d+\s*件宝贝/;
 
-    for (const candidate of exactCandidates) {
-      const count = await candidate.count().catch(() => 0);
-      for (let index = 0; index < count; index += 1) {
-        const item = candidate.nth(index);
-        if (!(await item.isVisible().catch(() => false))) {
-          continue;
-        }
+    const sheet = page.locator('[class*="areaWrap"]').first();
+    await sheet.waitFor({ state: 'visible', timeout: 12000 }).catch(() => undefined);
+    const hadSheet = await sheet.isVisible().catch(() => false);
 
+    const sheetClosedAfterClick = async (): Promise<boolean> => {
+      if (!hadSheet) return true;
+      try {
+        await sheet.waitFor({ state: 'hidden', timeout: 4500 });
+        return true;
+      } catch {
+        const still = await sheet.isVisible().catch(() => false);
+        return !still;
+      }
+    };
+
+    const tryClickViaDom = (): Promise<boolean> =>
+      page
+        .evaluate(() => {
+          const compact = (s: string) => s.replace(/\s+/g, '').trim();
+          const matches = (raw: string) => {
+            const t = compact(raw);
+            return /^查看\d+\+?件宝贝$/.test(t) || /^查看\d+件宝贝$/.test(t);
+          };
+
+          const cand: HTMLElement[] = [];
+          for (const n of document.querySelectorAll('button, a, [role="button"], div, span')) {
+            const el = n as HTMLElement;
+            const text = (el.innerText || el.textContent || '').trim();
+            if (!text || text.length > 64) continue;
+            if (!matches(text)) continue;
+            const r = el.getBoundingClientRect();
+            if (r.width < 48 || r.height < 8) continue;
+            if (r.bottom < -20 || r.top > window.innerHeight + 120) continue;
+            cand.push(el);
+          }
+
+          if (cand.length === 0) return false;
+
+          cand.sort((a, b) => {
+            const la = compact(a.innerText || a.textContent || '').length;
+            const lb = compact(b.innerText || b.textContent || '').length;
+            if (la !== lb) return la - lb;
+            return b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom;
+          });
+
+          const pick = cand[0];
+          const clickable =
+            (pick.closest('button, [role="button"], a[href]') as HTMLElement | null) || pick;
+          clickable.scrollIntoView({ block: 'center', inline: 'nearest' });
+          clickable.click();
+          return true;
+        })
+        .catch(() => false);
+
+    const tryClickLocator = async (
+      root: ReturnType<Page['locator']>,
+      opts?: { force?: boolean },
+    ): Promise<boolean> => {
+      const count = await root.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const el = root.nth(i);
+        if (!(await el.isVisible().catch(() => false))) continue;
         try {
-          await item.click({ timeout: 2000 });
-          console.log(`[scraper] 已点击区域选项: ${label}`);
+          await el.scrollIntoViewIfNeeded().catch(() => undefined);
+          await el.click({ timeout: 5000, force: opts?.force });
           return true;
         } catch {
           continue;
         }
       }
+      return false;
+    };
+
+    for (let attempt = 0; attempt < 8; attempt++) {
+      if ((await tryClickViaDom()) && (await sheetClosedAfterClick())) {
+        return true;
+      }
+
+      await page.getByText(viewGoods, { exact: false }).first().waitFor({ state: 'visible', timeout: 4000 }).catch(() => undefined);
+
+      if ((await tryClickLocator(page.getByRole('button', { name: viewGoods }))) && (await sheetClosedAfterClick())) {
+        return true;
+      }
+      if ((await tryClickLocator(page.locator('button').filter({ hasText: viewGoods }))) && (await sheetClosedAfterClick())) {
+        return true;
+      }
+      if ((await tryClickLocator(page.locator('[role="button"]').filter({ hasText: viewGoods }))) && (await sheetClosedAfterClick())) {
+        return true;
+      }
+      if ((await tryClickLocator(page.locator('a').filter({ hasText: viewGoods }))) && (await sheetClosedAfterClick())) {
+        return true;
+      }
+
+      const textHits = page.getByText(viewGoods);
+      const n = await textHits.count().catch(() => 0);
+      for (let i = n - 1; i >= 0; i--) {
+        const el = textHits.nth(i);
+        if (!(await el.isVisible().catch(() => false))) continue;
+        try {
+          await el.scrollIntoViewIfNeeded().catch(() => undefined);
+          await el.click({ timeout: 5000 });
+          if (await sheetClosedAfterClick()) return true;
+        } catch {
+          continue;
+        }
+      }
+
+      const forceLoc = page.locator('button, [role="button"], a').filter({ hasText: viewGoods }).last();
+      if ((await tryClickLocator(forceLoc, { force: true })) && (await sheetClosedAfterClick())) {
+        return true;
+      }
+      const forceText = page.getByText(viewGoods).last();
+      if ((await tryClickLocator(forceText, { force: true })) && (await sheetClosedAfterClick())) {
+        return true;
+      }
+
+      await page.waitForTimeout(400);
     }
 
     return false;
   }
 
-  private escapeRegExp(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  /** 在地区弹层内点击选项；多轮重试，避免列未渲染完就点 */
+  private async clickRegionOption(page: Page, label: string, level: string): Promise<boolean> {
+    const exactRegex = new RegExp(`^${this.escapeRegExp(label)}$`);
+    const maxRounds = 5;
+
+    for (let round = 0; round < maxRounds; round++) {
+      const modal = page.locator('[class*="areaWrap"]').first();
+      const modalVisible = await modal.isVisible().catch(() => false);
+
+      if (modalVisible) {
+        const provRows = modal.locator('[class*="provItem"]').filter({ hasText: exactRegex });
+        const provCount = await provRows.count();
+        for (let i = 0; i < provCount; i++) {
+          const item = provRows.nth(i);
+          if (!(await item.isVisible().catch(() => false))) continue;
+          try {
+            await item.scrollIntoViewIfNeeded().catch(() => undefined);
+            await item.click({ timeout: 3500 });
+            console.log(`[scraper] 已选择${level}: ${label}`);
+            await page.waitForTimeout(400);
+            return true;
+          } catch {
+            continue;
+          }
+        }
+
+        const byExact = modal.getByText(label, { exact: true });
+        const nExact = await byExact.count();
+        for (let i = 0; i < nExact; i++) {
+          const item = byExact.nth(i);
+          if (!(await item.isVisible().catch(() => false))) continue;
+          try {
+            await item.scrollIntoViewIfNeeded().catch(() => undefined);
+            await item.click({ timeout: 3500 });
+            console.log(`[scraper] 已选择${level}: ${label}`);
+            await page.waitForTimeout(400);
+            return true;
+          } catch {
+            continue;
+          }
+        }
+      }
+
+      const candidates = [
+        page.locator('div').filter({ hasText: exactRegex }),
+        page.locator('span').filter({ hasText: exactRegex }),
+        page.getByText(label, { exact: true }),
+      ];
+
+      for (const candidate of candidates) {
+        const count = await candidate.count().catch(() => 0);
+        for (let index = 0; index < count; index += 1) {
+          const item = candidate.nth(index);
+          const visible = await item.isVisible().catch(() => false);
+          if (!visible) continue;
+
+          try {
+            await item.scrollIntoViewIfNeeded().catch(() => undefined);
+            await item.click({ timeout: 3500 });
+            console.log(`[scraper] 已选择${level}: ${label}`);
+            await page.waitForTimeout(400);
+            return true;
+          } catch {
+            continue;
+          }
+        }
+      }
+
+      await page.waitForTimeout(180 + round * 100);
+    }
+
+    console.warn(`[scraper] 未找到${level}选项: ${label}`);
+    return false;
   }
 
   private mapTimeRangeLabel(timeRange?: string): string {
@@ -702,6 +867,10 @@ export class XianyuScraper {
     }
 
     return Math.round(price * 100);
+  }
+
+  private escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 }
 

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { isCookieConfigured, resolveCookieForRun } from '@/lib/cookie-pool';
 import { enqueueMonitorTask, getMonitorQueueSize } from '@/lib/monitor-queue';
 import { getSupabaseClient } from '@/storage/database/supabase-client';
 import {
@@ -47,7 +48,7 @@ export async function POST(
       `[trigger] 开始处理手动触发: configId=${config.id}, keyword=${config.search_keyword}, webhook=${config.webhook_url ? 'configured' : 'missing'}`,
     );
 
-    const hasCookie = Boolean(config.cookies);
+    const hasCookie = isCookieConfigured(config.cookies);
     const hasLocalProfile = Boolean(config.browser_user_data_dir);
 
     if (!hasCookie && !hasLocalProfile) {
@@ -60,6 +61,8 @@ export async function POST(
 
     const queueBeforeStart = getMonitorQueueSize();
     const result = await enqueueMonitorTask(`manual#${config.id}:${config.search_keyword}`, async () => {
+      const resolvedCookies = resolveCookieForRun(config.cookies, config.id);
+
       const browserOptions = {
         headless: config.browser_headless ?? undefined,
         saveDebugArtifacts: config.browser_save_debug ?? undefined,
@@ -71,7 +74,7 @@ export async function POST(
         userDataDir: config.browser_user_data_dir || undefined,
       };
 
-      const scraper = await createScraper(config.cookies || undefined, browserOptions);
+      const scraper = await createScraper(resolvedCookies, browserOptions);
 
       try {
         const products = await scraper.search({
@@ -83,7 +86,7 @@ export async function POST(
           regionDistrict: config.region_district || undefined,
           timeRange: config.time_range || undefined,
           sortType: config.sort_type || undefined,
-          cookies: config.cookies || undefined,
+          cookies: resolvedCookies,
           browserOptions,
         });
 

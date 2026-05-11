@@ -8,6 +8,7 @@ import {
   recordFetchedProducts,
   recordSentProduct,
 } from './xianyu-scraper';
+import { isCookieConfigured, resolveCookieForRun } from '@/lib/cookie-pool';
 import { sendWebhookNotification } from './webhook';
 
 interface MonitorConfig {
@@ -102,9 +103,11 @@ export function stopMonitor(configId: number) {
 
 export async function executeMonitor(config: MonitorConfig): Promise<Product[]> {
   try {
-    if (!config.cookies && !config.browser_user_data_dir) {
+    if (!isCookieConfigured(config.cookies) && !config.browser_user_data_dir) {
       console.warn(`配置 #${config.id} 未设置登录态，未提供 Cookie 或浏览器用户目录，可能无法正常抓取数据`);
     }
+
+    const resolvedCookies = resolveCookieForRun(config.cookies, config.id);
 
     const browserOptions = {
       headless: config.browser_headless ?? undefined,
@@ -114,7 +117,7 @@ export async function executeMonitor(config: MonitorConfig): Promise<Product[]> 
       userDataDir: config.browser_user_data_dir || undefined,
     };
 
-    const scraper = await createScraper(config.cookies || undefined, browserOptions);
+    const scraper = await createScraper(resolvedCookies, browserOptions);
 
     try {
       const products = await scraper.search({
@@ -126,7 +129,7 @@ export async function executeMonitor(config: MonitorConfig): Promise<Product[]> 
         regionDistrict: config.region_district || undefined,
         timeRange: config.time_range || undefined,
         sortType: config.sort_type || undefined,
-        cookies: config.cookies || undefined,
+        cookies: resolvedCookies,
         browserOptions,
       });
 

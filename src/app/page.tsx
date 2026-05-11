@@ -30,6 +30,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { getCitiesByProvince, PROVINCE_OPTIONS } from '@/lib/china-regions';
+import {
+  decodeCookieStorageForForm,
+  encodeCookieStorageForDb,
+  formatCookieBadge,
+} from '@/lib/cookie-pool';
 
 interface MonitorConfig {
   id: number;
@@ -64,7 +69,8 @@ interface FormDataState {
   sort_type: string;
   cron_expression: string;
   webhook_url: string;
-  cookies: string;
+  cookie_pool_strategy: 'round_robin' | 'random';
+  cookie_entries: string[];
   is_active: boolean;
   browser_headless: boolean;
   browser_save_debug: boolean;
@@ -84,7 +90,8 @@ const defaultFormData: FormDataState = {
   sort_type: 'newest',
   cron_expression: '0 */30 * * * *',
   webhook_url: '',
-  cookies: '',
+  cookie_pool_strategy: 'round_robin',
+  cookie_entries: [''],
   is_active: true,
   browser_headless: false,
   browser_save_debug: true,
@@ -176,11 +183,12 @@ export default function Home() {
 
   const openCreateForm = () => {
     setEditingConfig(null);
-    setFormData(defaultFormData);
+    setFormData({ ...defaultFormData });
     setShowForm(true);
   };
 
   const handleEdit = (config: MonitorConfig) => {
+    const cookieForm = decodeCookieStorageForForm(config.cookies);
     setEditingConfig(config);
     setFormData({
       search_keyword: config.search_keyword,
@@ -193,7 +201,8 @@ export default function Home() {
       sort_type: config.sort_type || 'newest',
       cron_expression: config.cron_expression,
       webhook_url: config.webhook_url || '',
-      cookies: config.cookies || '',
+      cookie_pool_strategy: cookieForm.strategy,
+      cookie_entries: cookieForm.entries,
       is_active: config.is_active,
       browser_headless: config.browser_headless ?? false,
       browser_save_debug: config.browser_save_debug ?? true,
@@ -215,7 +224,7 @@ export default function Home() {
     sort_type: formData.sort_type || null,
     cron_expression: formData.cron_expression,
     webhook_url: formData.webhook_url || null,
-    cookies: formData.cookies || null,
+    cookies: encodeCookieStorageForDb(formData.cookie_pool_strategy, formData.cookie_entries),
     is_active: formData.is_active,
     browser_headless: formData.browser_headless,
     browser_save_debug: formData.browser_save_debug,
@@ -412,7 +421,7 @@ export default function Home() {
                   <div className="flex flex-col gap-3 text-sm text-slate-600 md:flex-row md:items-center md:justify-between">
                     <div className="flex flex-wrap items-center gap-4">
                       <span className="flex items-center gap-1"><Bell className="h-4 w-4" />{config.webhook_url ? '已配置通知' : '未配置通知'}</span>
-                      <span className="flex items-center gap-1"><Cookie className="h-4 w-4" />{config.cookies ? '已配置 Cookie' : '未配置 Cookie'}</span>
+                      <span className="flex items-center gap-1"><Cookie className="h-4 w-4" />{formatCookieBadge(config.cookies)}</span>
                       <span className="flex items-center gap-1"><Eye className="h-4 w-4" />{(config.browser_headless ? '无头' : '可视') + ' / ' + (config.browser_channel || '系统默认')}</span>
                       <span className="flex items-center gap-1"><Bug className="h-4 w-4" />{config.browser_save_debug ?? true ? '保存调试文件' : '不保存调试文件'}</span>
                       <span className="flex items-center gap-1"><Clock className="h-4 w-4" />{getCronDescription(config.cron_expression)}</span>
@@ -541,16 +550,94 @@ export default function Home() {
                   <p className="text-xs text-slate-500">当前：{getCronDescription(formData.cron_expression)}</p>
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="cookies" className="flex items-center gap-2">
-                    <Cookie className="h-4 w-4" />
-                    闲鱼 Cookie
-                  </Label>
-                  <Textarea id="cookies" value={formData.cookies} onChange={e => updateForm('cookies', e.target.value)} rows={4} className="font-mono text-xs" placeholder="粘贴浏览器复制的 Cookie 字符串或 JSON 导出内容" />
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-                    建议先在本地浏览器里确认已登录 goofish.com，再复制 Cookie。若你复用浏览器用户目录，Cookie 也可以只作为补充。
-                  </div>
-                </div>
+                <Card className="border-slate-200 bg-slate-50/80">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-base flex items-center gap-2">
+                      <Cookie className="h-4 w-4" />
+                      闲鱼 Cookie 池
+                    </CardTitle>
+                    <CardDescription>
+                      可添加多组 Cookie；定时任务每次执行会<strong>轮询</strong>或<strong>随机</strong>选用其中一组（单组仍与以往相同，直接存原始字符串）。
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-2 max-w-xs">
+                      <Label>选用策略（多组时生效）</Label>
+                      <Select
+                        value={formData.cookie_pool_strategy}
+                        onValueChange={value =>
+                          updateForm('cookie_pool_strategy', value as FormDataState['cookie_pool_strategy'])
+                        }
+                      >
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="round_robin">轮流使用</SelectItem>
+                          <SelectItem value="random">随机选用</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <Label>Cookie 条目（每组一条）</Label>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-1"
+                          onClick={() =>
+                            setFormData(prev => ({
+                              ...prev,
+                              cookie_entries: [...prev.cookie_entries, ''],
+                            }))
+                          }
+                        >
+                          <Plus className="h-4 w-4" />
+                          添加一组
+                        </Button>
+                      </div>
+                      {formData.cookie_entries.map((entry, index) => (
+                        <div key={index} className="flex flex-col gap-2 sm:flex-row sm:items-start">
+                          <Textarea
+                            id={`cookie-entry-${index}`}
+                            value={entry}
+                            onChange={e =>
+                              setFormData(prev => ({
+                                ...prev,
+                                cookie_entries: prev.cookie_entries.map((c, i) =>
+                                  i === index ? e.target.value : c,
+                                ),
+                              }))
+                            }
+                            rows={3}
+                            className="font-mono text-xs sm:flex-1"
+                            placeholder="该组的 Cookie 字符串或 JSON 导出内容"
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="shrink-0 text-slate-500"
+                            onClick={() =>
+                              setFormData(prev => ({
+                                ...prev,
+                                cookie_entries:
+                                  prev.cookie_entries.length <= 1
+                                    ? ['']
+                                    : prev.cookie_entries.filter((_, i) => i !== index),
+                              }))
+                            }
+                            aria-label={`删除第 ${index + 1} 组 Cookie`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                      建议先在本地浏览器登录 goofish.com 再复制 Cookie。使用浏览器用户目录时，仍可把 Cookie 作为补充。
+                    </div>
+                  </CardContent>
+                </Card>
 
                 <div className="space-y-2">
                   <Label htmlFor="webhook">Webhook 通知地址</Label>

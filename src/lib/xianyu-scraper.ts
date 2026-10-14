@@ -2,7 +2,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { BrowserContext, Cookie, ElementHandle, Page } from 'playwright';
 import { acquireBrowserLease, BrowserRuntimeOptions } from '@/lib/browser-manager';
-import { getSupabaseClient } from '@/storage/database/supabase-client';
+import { getMonitorBackendClient as getSupabaseClient } from '@/storage/database/supabase-client';
+import { CollectionPausedError, FilterNotAppliedError, refusalReason } from './collection-safety';
 
 export interface Product {
   id: string;
@@ -51,6 +52,23 @@ export class XianyuScraper {
   private context: BrowserContext | null = null;
   private browserLease: BrowserLease | null = null;
   private runtimeOptions: BrowserRuntimeOptions = this.getRuntimeOptions();
+  private refusal: string | undefined;
+
+  private async assertAccessible(page: Page, stage: string) {
+    if (this.refusal) throw new CollectionPausedError(stage, this.refusal);
+    const signals = [
+      page.locator('#baxia-dialog-content, #nc_1_wrapper, iframe[src*="captcha"], iframe[src*="punish"]'),
+      page.getByText(/^(请完成安全验证|拖动滑块完成验证|请拖动滑块|访问过于频繁|扫码登录|请登录后继续)$/),
+    ];
+    for (const signal of signals) {
+      for (let index = 0; index < await signal.count(); index++) {
+        if (await signal.nth(index).isVisible()) throw new CollectionPausedError(stage, '可见验证或登录提示');
+      }
+    }
+    if (/\/punish|\/captcha|\/login(?:[/?#]|$)/i.test(page.url())) {
+      throw new CollectionPausedError(stage, '跳转验证或登录页面');
+    }
+  }
 
   async init(cookies?: string, overrides?: Partial<BrowserRuntimeOptions>) {
     if (this.context) {
@@ -81,6 +99,10 @@ export class XianyuScraper {
     }
 
     const page = await this.context!.newPage();
+    this.refusal = undefined;
+    page.on('response', response => {
+      this.refusal = refusalReason(response.status(), response.url()) || this.refusal;
+    });
 
     try {
       const searchUrl = this.buildSearchUrl(config);
@@ -93,7 +115,10 @@ export class XianyuScraper {
       await page.waitForTimeout(3000);
       await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => undefined);
 
+      await this.assertAccessible(page, '打开搜索页');
+
       await this.applySearchFilters(page, config);
+      await this.assertAccessible(page, '筛选完成');
 
       const pageTitle = await page.title().catch(() => '');
       console.log(`[scraper] 当前页面标题: ${pageTitle}`);
@@ -105,11 +130,18 @@ export class XianyuScraper {
 
       await this.saveDebugArtifacts(page, 'search');
       const products = await this.extractProducts(page);
+      if (products.length === 0 && !(await page.getByText(/^(没有找到相关宝贝|暂无相关宝贝|暂无相关商品|没有找到相关商品)$/).first().isVisible().catch(() => false))) {
+        throw new FilterNotAppliedError('未提取到商品且没有确认空结果提示，本轮不建立基线或推送');
+      }
       console.log(`[scraper] 最终提取到 ${products.length} 个商品`);
-      return products;
+      // Price is stored in cents; reject unverifiable/out-of-range prices locally too.
+      return products.filter(product =>
+        (config.priceMin === undefined || product.price >= config.priceMin * 100) &&
+        (config.priceMax === undefined || product.price <= config.priceMax * 100));
     } catch (error) {
       console.error('[scraper] 搜索失败:', error);
       await this.saveDebugArtifacts(page, 'error');
+      await this.assertAccessible(page, '扫描失败');
       throw error;
     } finally {
       await page.close().catch(() => undefined);
@@ -245,7 +277,10 @@ export class XianyuScraper {
   private async applySearchFilters(page: Page, config: SearchConfig) {
     await page
       .waitForSelector('.search-container--eigqxPi6', { timeout: 15000 })
-      .catch(() => undefined);
+      .catch(async () => {
+        await this.assertAccessible(page, '等待搜索控件');
+        throw new FilterNotAppliedError('搜索控件未就绪，本轮不推送');
+      });
 
     await this.applyRegionFilter(page, config.regionProvince, config.regionCity, config.regionDistrict);
 
@@ -259,13 +294,14 @@ export class XianyuScraper {
       await this.selectDropdownOption(page, '价格', '价格从高到低');
     }
 
-    if (config.priceMin || config.priceMax) {
+    if (config.priceMin !== undefined || config.priceMax !== undefined) {
       await this.fillPriceRange(page, config.priceMin, config.priceMax);
     }
 
     await this.toggleCheckboxByLabel(page, '个人闲置');
     await page.waitForTimeout(2500);
     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => undefined);
+    await this.assertAccessible(page, '应用筛选');
   }
 
   private async applyRegionFilter(
@@ -280,6 +316,7 @@ export class XianyuScraper {
 
     const maxAttempts = 3;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      await this.assertAccessible(page, '地区筛选');
       console.log(
         `[scraper] 准备应用区域筛选 (${attempt}/${maxAttempts}): province=${province || '-'}, city=${city || '-'}, district=${district || '-'}`,
       );
@@ -299,9 +336,8 @@ export class XianyuScraper {
       }
     }
 
-    console.warn('[scraper] 区域筛选在多次尝试后仍失败');
-    await page.keyboard.press('Escape').catch(() => undefined);
-    await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => undefined);
+    await this.assertAccessible(page, '地区筛选失败');
+    throw new FilterNotAppliedError('地区筛选未确认，本轮不推送');
   }
 
   /** 单次打开弹层、选省市区县、点「查看…宝贝」；失败时由上层重试 */
@@ -351,6 +387,21 @@ export class XianyuScraper {
 
     if (province && !(await this.clickRegionOption(page, province, '省份'))) {
       return false;
+    }
+
+    if (province && !city && !districtTrimmed) {
+      // Province-only monitoring must explicitly select the whole province, never a default city.
+      const wholeProvince = await this.clickRegionOption(page, `全${province}`, '全省');
+      if (!wholeProvince) {
+        throw new FilterNotAppliedError(`网页未提供可确认的“全${province}”省级选项，停止采集，不回退城市或全国`);
+      }
+      const confirmed = await this.clickRegionConfirmButton(page);
+      if (!confirmed) return false;
+      const labels = await page.locator('.areaTextContainer--IQ5moIFF, span.areaText--mQJFfu1p').allTextContents();
+      const allowed = [province, `${province}省`, `全${province}`, `全${province}省`, `${province}全省`];
+      const verified = labels.some(label => allowed.includes(label.replace(/\s+/g, '').replace(/^区域[:：]?/, '')));
+      if (!verified) throw new FilterNotAppliedError(`无法确认${province}全省已选中，停止采集`);
+      return true;
     }
 
     if (city) {
@@ -451,6 +502,7 @@ export class XianyuScraper {
     };
 
     for (let attempt = 0; attempt < 8; attempt++) {
+      await this.assertAccessible(page, '确认地区');
       if ((await tryClickViaDom()) && (await sheetClosedAfterClick())) {
         return true;
       }
@@ -590,11 +642,11 @@ export class XianyuScraper {
       .first();
 
     if ((await dropdown.count()) === 0) {
-      console.warn(`[scraper] 未找到筛选下拉框: ${title}`);
-      return;
+      throw new FilterNotAppliedError(`未找到筛选下拉框: ${title}`);
     }
 
-    await dropdown.click().catch(() => undefined);
+    await this.assertAccessible(page, '选择排序/时间');
+    await dropdown.click();
     await page.waitForTimeout(300);
 
     const optionLocator = page
@@ -603,33 +655,33 @@ export class XianyuScraper {
       .first();
 
     if ((await optionLocator.count()) === 0) {
-      console.warn(`[scraper] 未找到筛选项: ${title} -> ${option}`);
-      return;
+      throw new FilterNotAppliedError(`未找到筛选项: ${title} -> ${option}`);
     }
 
-    await optionLocator.click().catch(() => undefined);
+    await optionLocator.click();
     console.log(`[scraper] 已应用筛选: ${title} -> ${option}`);
     await page.waitForTimeout(1200);
+    await this.assertAccessible(page, '排序/时间筛选后');
   }
 
   private async fillPriceRange(page: Page, priceMin?: number, priceMax?: number) {
     const inputs = page.locator('.search-price-input--p1NQEAuz');
     if ((await inputs.count()) < 2) {
-      console.warn('[scraper] 未找到价格输入框');
-      return;
+      throw new FilterNotAppliedError('未找到价格输入框');
     }
 
-    if (priceMin) {
-      await inputs.nth(0).fill(String(priceMin)).catch(() => undefined);
+    if (priceMin !== undefined) {
+      await inputs.nth(0).fill(String(priceMin));
     }
-    if (priceMax) {
-      await inputs.nth(1).fill(String(priceMax)).catch(() => undefined);
+    if (priceMax !== undefined) {
+      await inputs.nth(1).fill(String(priceMax));
     }
 
     const confirmButton = page.locator('.search-price-confirm-button--I2ThavjG').first();
-    await confirmButton.click().catch(() => undefined);
+    await confirmButton.click();
     console.log(`[scraper] 已填写价格区间: ${priceMin ?? ''}-${priceMax ?? ''}`);
     await page.waitForTimeout(1500);
+    await this.assertAccessible(page, '价格筛选后');
   }
 
   private async toggleCheckboxByLabel(page: Page, label: string) {
@@ -876,12 +928,14 @@ export class XianyuScraper {
 
 export async function isProductSent(productId: string, configId: number): Promise<boolean> {
   const client = getSupabaseClient();
-  const { data } = await client
+  const { data, error } = await client
     .from('sent_products')
     .select('id')
     .eq('product_id', productId)
     .eq('config_id', configId)
     .limit(1);
+
+  if (error) throw new Error('已发送商品查询失败，本轮不推送');
 
   return (data?.length || 0) > 0;
 }
@@ -892,7 +946,7 @@ export async function recordSentProduct(
   product: Product,
 ): Promise<void> {
   const client = getSupabaseClient();
-  await client.from('sent_products').insert({
+  const { error } = await client.from('sent_products').insert({
     product_id: productId,
     config_id: configId,
     title: product.title,
@@ -900,6 +954,7 @@ export async function recordSentProduct(
     url: product.url,
     image_url: product.imageUrl,
   });
+  if (error) throw new Error('已发送商品记账失败，投递状态不确定');
 }
 
 export async function recordFetchedProducts(
@@ -913,7 +968,7 @@ export async function recordFetchedProducts(
   }
 
   const client = getSupabaseClient();
-  await client.from('fetched_products').insert(
+  const { error } = await client.from('fetched_products').insert(
     products.map(product => ({
       batch_id: batchId,
       config_id: configId,
@@ -927,6 +982,7 @@ export async function recordFetchedProducts(
       location: product.location || null,
     })),
   );
+  if (error) throw new Error('扫描结果保存失败，本轮不推送');
 }
 
 export async function createScraper(

@@ -1,0 +1,15 @@
+{
+  "search_keyword": "摩托车",
+  "price_min": null,
+  "price_max": null,
+  "region_province": "河北",
+  "region_city": null,
+  "region_district": null,
+  "time_range": "1hour",
+  "sort_type": "newest",
+  "cron_expression": "0 */15 * * * *",
+  "webhook_url": null,
+  "cookies": null,
+  "browser_user_data_dir": null,
+  "is_active": false
+}

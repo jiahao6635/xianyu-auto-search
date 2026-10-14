@@ -1,4 +1,4 @@
-import { boolean, index, integer, pgTable, serial, text, timestamp, varchar } from 'drizzle-orm/pg-core';
+import { boolean, index, integer, jsonb, pgTable, primaryKey, serial, text, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
 
 export const healthCheck = pgTable('health_check', {
   id: serial().notNull(),
@@ -48,6 +48,7 @@ export const sentProducts = pgTable(
     index('sent_products_product_id_idx').on(table.productId),
     index('sent_products_config_id_idx').on(table.configId),
     index('sent_products_sent_at_idx').on(table.sentAt),
+    uniqueIndex('sent_products_config_product_unique').on(table.configId, table.productId),
   ],
 );
 
@@ -74,3 +75,40 @@ export const fetchedProducts = pgTable(
     index('fetched_products_fetched_at_idx').on(table.fetchedAt),
   ],
 );
+
+export const monitorState = pgTable('monitor_state', {
+  configId: integer('config_id').primaryKey().references(() => monitorConfigs.id, { onDelete: 'cascade' }),
+  baselineInitialized: boolean('baseline_initialized').notNull().default(false),
+  scopeKey: text('scope_key'),
+  scanFailures: integer('scan_failures').notNull().default(0),
+  nextScanAt: timestamp('next_scan_at', { withTimezone: true }),
+  lastScanAt: timestamp('last_scan_at', { withTimezone: true }),
+  nextDeliveryAt: timestamp('next_delivery_at', { withTimezone: true }),
+  scanToken: uuid('scan_token'),
+  scanLeaseUntil: timestamp('scan_lease_until', { withTimezone: true }),
+});
+
+export const monitorSeen = pgTable('monitor_seen', {
+  configId: integer('config_id').notNull().references(() => monitorConfigs.id, { onDelete: 'cascade' }),
+  productId: varchar('product_id', { length: 255 }).notNull(),
+  firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull(),
+  platformPublishTime: text('platform_publish_time'),
+  baseline: boolean('baseline').notNull(),
+}, table => [primaryKey({ name: 'monitor_seen_config_product_unique', columns: [table.configId, table.productId] })]);
+
+export const monitorOutbox = pgTable('monitor_outbox', {
+  eventId: text('event_id').primaryKey(),
+  configId: integer('config_id').notNull().references(() => monitorConfigs.id, { onDelete: 'cascade' }),
+  productId: varchar('product_id', { length: 255 }).notNull(),
+  scopeKey: text('scope_key').notNull(),
+  payload: jsonb('payload').notNull(),
+  status: text('status').notNull().default('pending'),
+  attempts: integer('attempts').notNull().default(0),
+  nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+  attemptToken: uuid('attempt_token'),
+  leaseUntil: timestamp('lease_until', { withTimezone: true }),
+  lastError: text('last_error'),
+  deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [uniqueIndex('monitor_outbox_config_product_unique').on(table.configId, table.productId),
+  index('monitor_outbox_due_idx').on(table.configId, table.status, table.nextAttemptAt)]);

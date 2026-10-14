@@ -30,6 +30,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { getCitiesByProvince, PROVINCE_OPTIONS } from '@/lib/china-regions';
+import { getCronDescription, isLegacyFrequency, MONITOR_FREQUENCIES } from '@/lib/monitor-frequency';
 import {
   decodeCookieStorageForForm,
   encodeCookieStorageForDb,
@@ -81,9 +82,9 @@ interface FormDataState {
 
 const defaultFormData: FormDataState = {
   search_keyword: '摩托车',
-  price_min: '20000',
+  price_min: '',
   price_max: '',
-  region_province: '',
+  region_province: '河北',
   region_city: '',
   region_district: '',
   time_range: '1hour',
@@ -101,26 +102,16 @@ const defaultFormData: FormDataState = {
 };
 
 const getTimeRangeLabel = (range: string | null) =>
-  ({ '1hour': '1 小时内', '24hours': '24 小时内', '7days': '7 天内' }[range || ''] || '不限');
+  ({ '1hour': '最新（非严格 1 小时）', '24hours': '24 小时内', '7days': '7 天内' }[range || ''] || '不限');
 
 const getSortTypeLabel = (sort: string | null) =>
   ({ newest: '最新上架', price_asc: '价格从低到高', price_desc: '价格从高到低' }[sort || ''] ||
     '默认排序');
 
-const getCronDescription = (cron: string) =>
-  ({
-    '0 */5 * * * *': '每 5 分钟',
-    '0 */10 * * * *': '每 10 分钟',
-    '0 */15 * * * *': '每 15 分钟',
-    '0 */30 * * * *': '每 30 分钟',
-    '0 * * * * *': '每小时',
-    '0 */2 * * * *': '每 2 小时',
-    '0 */6 * * * *': '每 6 小时',
-    '0 0 * * * *': '每天整点',
-  }[cron] || cron);
-
 const getRegionLabel = (config: Pick<MonitorConfig, 'region_province' | 'region_city' | 'region_district'>) =>
-  [config.region_province, config.region_city, config.region_district].filter(Boolean).join(' / ');
+  config.region_province && !config.region_city && !config.region_district
+    ? `${config.region_province}全省`
+    : [config.region_province, config.region_city, config.region_district].filter(Boolean).join(' / ');
 
 export default function Home() {
   const [configs, setConfigs] = useState<MonitorConfig[]>([]);
@@ -493,7 +484,7 @@ export default function Home() {
                       >
                         <SelectTrigger><SelectValue placeholder="不限城市" /></SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="all">不限城市</SelectItem>
+                          <SelectItem value="all">{formData.region_province ? `${formData.region_province}全省` : '不限城市'}</SelectItem>
                           {cityOptions.map(city => (
                             <SelectItem key={city} value={city}>{city}</SelectItem>
                           ))}
@@ -513,7 +504,7 @@ export default function Home() {
                     <Select value={formData.time_range} onValueChange={value => updateForm('time_range', value)}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="1hour">1 小时内</SelectItem>
+                        <SelectItem value="1hour">最新（非严格 1 小时）</SelectItem>
                         <SelectItem value="24hours">24 小时内</SelectItem>
                         <SelectItem value="7days">7 天内</SelectItem>
                       </SelectContent>
@@ -537,17 +528,18 @@ export default function Home() {
                   <Select value={formData.cron_expression} onValueChange={value => updateForm('cron_expression', value)}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="0 */5 * * * *">每 5 分钟</SelectItem>
-                      <SelectItem value="0 */10 * * * *">每 10 分钟</SelectItem>
-                      <SelectItem value="0 */15 * * * *">每 15 分钟</SelectItem>
-                      <SelectItem value="0 */30 * * * *">每 30 分钟</SelectItem>
-                      <SelectItem value="0 * * * * *">每小时</SelectItem>
-                      <SelectItem value="0 */2 * * * *">每 2 小时</SelectItem>
-                      <SelectItem value="0 */6 * * * *">每 6 小时</SelectItem>
-                      <SelectItem value="0 0 * * * *">每天整点</SelectItem>
+                      {MONITOR_FREQUENCIES.map(option => (
+                        <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                      ))}
+                      {!MONITOR_FREQUENCIES.some(option => option.value === formData.cron_expression) && (
+                        <SelectItem value={formData.cron_expression}>{getCronDescription(formData.cron_expression)}</SelectItem>
+                      )}
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-slate-500">当前：{getCronDescription(formData.cron_expression)}</p>
+                  {isLegacyFrequency(formData.cron_expression) && (
+                    <p className="text-xs text-amber-700">此任务保留原表达式，按分钟执行。若原意是按小时扫描，请重新选择对应小时档位并保存。</p>
+                  )}
                 </div>
 
                 <Card className="border-slate-200 bg-slate-50/80">

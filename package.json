@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "test:monitor": "node --experimental-strip-types --experimental-loader ./tests/scraper-stubs-loader.mjs --test tests/*.test.mjs",
+    "test:scraper-safety": "node --experimental-strip-types --experimental-loader ./tests/scraper-stubs-loader.mjs tests/scraper-safety.check.mjs",
     "build": "bash ./scripts/build.sh",
     "dev": "node ./scripts/dev.mjs",
     "preinstall": "npx only-allow pnpm",

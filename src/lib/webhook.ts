@@ -1,8 +1,22 @@
-import { Product } from './xianyu-scraper';
+import type { Product } from './xianyu-scraper';
+import { createHmac } from 'node:crypto';
+import { DeliveryRejectedError, DeliveryUncertainError } from './monitor-outbox';
+import type { OutboxJob } from './monitor-outbox';
 
 interface MonitorConfig {
   id: number;
   search_keyword: string;
+}
+
+export class DeliveryAccountingError extends Error {}
+
+async function acknowledge(batch: Product[], callback?: (batch: Product[]) => Promise<void>) {
+  if (!callback) return;
+  try {
+    await callback(batch);
+  } catch {
+    throw new DeliveryAccountingError('通知已接受但记账失败，状态不确定；请人工核对后恢复');
+  }
 }
 
 interface GenericWebhookPayload {
@@ -39,7 +53,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 function isFeishuWebhook(webhookUrl: string): boolean {
-  return webhookUrl.includes('open.feishu.cn/open-apis/bot/');
+  const url = new URL(webhookUrl);
+  return url.protocol === 'https:' && url.hostname === 'open.feishu.cn' && url.pathname.startsWith('/open-apis/bot/v2/hook/');
 }
 
 function formatPrice(price: number): string {
@@ -217,25 +232,34 @@ function summarizeProducts(products: Product[]): string {
 async function postWebhook(
   webhookUrl: string,
   payload: unknown,
-  options?: { label?: string; checkFeishuBusinessCode?: boolean },
+  options?: { label?: string; checkFeishuBusinessCode?: boolean; eventId?: string },
 ) {
   const label = options?.label || 'webhook';
-  console.log(`[webhook] ${label} 请求体预览: ${JSON.stringify(payload).slice(0, 1000)}`);
+  console.log(`[webhook] ${label} 开始投递`);
 
-  const response = await fetch(webhookUrl, {
+  let response: Response;
+  let rawBody: string;
+  try {
+    response = await fetch(webhookUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...(options?.eventId ? { 'Idempotency-Key': options.eventId } : {}),
     },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15000),
+    redirect: 'error',
   });
-
-  const rawBody = await response.text();
+    rawBody = await response.text();
+  } catch {
+    throw new DeliveryUncertainError(`${label} 网络或响应结果不确定，请人工核对`);
+  }
   console.log(`[webhook] ${label} HTTP 响应: status=${response.status} ${response.statusText}`);
-  console.log(`[webhook] ${label} 响应体: ${rawBody || '<empty>'}`);
 
   if (!response.ok) {
-    throw new Error(`${label} HTTP 失败: ${response.status} ${response.statusText}`);
+    if (response.status === 429) throw new DeliveryRejectedError(true, `${label} HTTP 失败: 429`);
+    if (response.status >= 400 && response.status < 500) throw new DeliveryRejectedError(false, `${label} HTTP 失败: ${response.status}`);
+    throw new DeliveryUncertainError(`${label} HTTP ${response.status} 结果不确定`);
   }
 
   if (options?.checkFeishuBusinessCode) {
@@ -243,19 +267,42 @@ async function postWebhook(
     try {
       feishuResult = rawBody ? (JSON.parse(rawBody) as FeishuWebhookResponse) : null;
     } catch {
-      throw new Error(`${label} 返回了非 JSON 响应: ${rawBody}`);
+      throw new DeliveryUncertainError(`${label} 返回非 JSON，结果不确定`);
     }
 
-    const businessCode = feishuResult?.code ?? feishuResult?.StatusCode ?? 0;
+    const businessCode = feishuResult?.code ?? feishuResult?.StatusCode;
     const businessMessage = feishuResult?.msg ?? feishuResult?.StatusMessage ?? 'unknown error';
 
     if (businessCode !== 0) {
-      throw new Error(`${label} 业务失败: code=${businessCode}, msg=${businessMessage}`);
+      if (typeof businessCode !== 'number') throw new DeliveryUncertainError(`${label} 业务失败: 缺少明确业务码，结果不确定`);
+      throw new DeliveryRejectedError([9499,11232].includes(businessCode), `${label} 业务失败: code=${businessCode}, msg=${businessMessage}`);
     }
   }
 }
 
-async function sendFeishuBatches(webhookUrl: string, products: Product[], config: MonitorConfig) {
+export async function sendOutboxNotification(webhookUrl: string, job: OutboxJob, config: MonitorConfig): Promise<void> {
+  const feishu = isFeishuWebhook(webhookUrl);
+  const product = job.payload.product;
+  let payload: unknown;
+  if (feishu) {
+    const card = buildFeishuCardPayload([product], config, 0, 1);
+    card.card.header.title.content = '闲鱼摩托车新发现';
+    card.card.elements.push({ tag: 'note', elements: [{ tag: 'plain_text', content:
+      `事件：${job.event_id}\n首次发现：${job.payload.first_seen_at}\n平台发布时间：${job.payload.platform_publish_time || '未知，不能确认刚上架'}` }] });
+    const secret = process.env.FEISHU_BOT_SECRET;
+    if (secret) {
+      const timestamp = String(Math.floor(Date.now()/1000));
+      payload = { ...card, timestamp, sign: createHmac('sha256', `${timestamp}\n${secret}`).update('').digest('base64') };
+    } else payload = card;
+  } else {
+    payload = { ...buildGenericPayload([product], config), eventId: job.event_id,
+      firstSeenAt: job.payload.first_seen_at, platformPublishTime: job.payload.platform_publish_time };
+  }
+  await postWebhook(webhookUrl, payload, { label: 'outbox', checkFeishuBusinessCode: feishu, eventId: job.event_id });
+  await sleep(FEISHU_INTER_BATCH_DELAY_MS);
+}
+
+async function sendFeishuBatches(webhookUrl: string, products: Product[], config: MonitorConfig, onDelivered?: (batch: Product[]) => Promise<void>) {
   const batches = chunkProducts(products, FEISHU_BATCH_SIZE);
   console.log(
     `[webhook] 飞书卡片分批发送: total=${products.length}, batches=${batches.length}, batchSize=${FEISHU_BATCH_SIZE}`,
@@ -267,11 +314,18 @@ async function sendFeishuBatches(webhookUrl: string, products: Product[], config
     );
 
     const payload = buildFeishuCardPayload(batch, config, index, batches.length);
+    const signedPayload = () => {
+      const secret = process.env.FEISHU_BOT_SECRET;
+      if (!secret) return payload;
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      const sign = createHmac('sha256', `${timestamp}\n${secret}`).update('').digest('base64');
+      return { ...payload, timestamp, sign };
+    };
     const label = `feishu card batch ${index + 1}/${batches.length}`;
     const maxAttempts = 4;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        await postWebhook(webhookUrl, payload, {
+        await postWebhook(webhookUrl, signedPayload(), {
           label,
           checkFeishuBusinessCode: true,
         });
@@ -280,6 +334,8 @@ async function sendFeishuBatches(webhookUrl: string, products: Product[], config
         const message = error instanceof Error ? error.message : String(error);
         const isFreqLimited =
           message.includes('11232') ||
+          message.includes('code=9499') ||
+          message.includes('HTTP 失败: 429') ||
           message.includes('frequency limited') ||
           message.includes('Frequency limit');
         if (!isFreqLimited || attempt === maxAttempts) {
@@ -293,6 +349,9 @@ async function sendFeishuBatches(webhookUrl: string, products: Product[], config
       }
     }
 
+    // A failed acknowledgement must not re-enter the network retry loop.
+    await acknowledge(batch, onDelivered);
+
     if (index < batches.length - 1) {
       await sleep(FEISHU_INTER_BATCH_DELAY_MS);
     }
@@ -303,6 +362,7 @@ export async function sendWebhookNotification(
   webhookUrl: string,
   products: Product[],
   config: MonitorConfig,
+  onDelivered?: (batch: Product[]) => Promise<void>,
 ): Promise<void> {
   const feishu = isFeishuWebhook(webhookUrl);
 
@@ -313,11 +373,12 @@ export async function sendWebhookNotification(
 
   try {
     if (feishu) {
-      await sendFeishuBatches(webhookUrl, products, config);
+      await sendFeishuBatches(webhookUrl, products, config, onDelivered);
     } else {
       await postWebhook(webhookUrl, buildGenericPayload(products, config), {
         label: 'generic webhook',
       });
+      await acknowledge(products, onDelivered);
     }
 
     console.log(`[webhook] 通知发送成功: count=${products.length}, configId=${config.id}`);
